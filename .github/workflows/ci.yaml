@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+      - "!dependabot/**"
+    tags:
+      - 'v[0-9]+\.[0-9]+\.[0-9]+-?**'
+  pull_request: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Install cargo binstall
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install wasmtime
+        run: cargo binstall --force wasmtime-cli
+      - name: Install wkg
+        run: cargo binstall --force wkg
+      - name: Install wasm-tools
+        run: cargo binstall --force wasm-tools
+      - name: Sync wit
+        run: make wit
+      - name: Check for drift in generated wit
+        run: git diff --exit-code .
+      - name: Build components
+        run: make components
+      - name: Collect components.tar
+        run: tar -cvf ../components.tar *.wasm*
+        working-directory: ./lib
+      - name: Upload components.tar
+        uses: actions/upload-artifact@v7
+        with:
+          name: components.tar
+          path: components.tar
+          retention-days: 7
+      - name: Test
+        run: make test
+      - name: Capture WIT
+        working-directory: ./lib
+        run: |
+          for component in *.wasm ; do
+            echo "::group::${component} ($(du -h ${component} | cut -f1 ))"
+              wasm-tools component wit "${component}"
+            echo "::endgroup::"
+          done
+
+  publish:
+    if: github.event_name == 'push' && ( startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' )
+    needs:
+      - build
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Install cargo binstall
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install wkg
+        run: cargo binstall --force wkg
+      - name: Install wasm-tools
+        run: cargo binstall --force wasm-tools
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+      - name: Download components.tar
+        uses: actions/download-artifact@v8
+        with:
+          name: components.tar
+      - name: Extract components
+        run: tar -xvf components.tar -C lib
+      - name: Get interface version
+        id: interface_version
+        run: echo "VERSION=$( wasm-tools component wit lib/interface.wasm --json | jq -r "[.packages[] | select(.name | contains(\"${GITHUB_REPOSITORY/\//:}@\"))][0].name" | cut -d'@' -f2 )" >> $GITHUB_OUTPUT
+      - name: Get tag version
+        if: startsWith(github.ref, 'refs/tags/')
+        id: tag_version
+        run: echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_OUTPUT
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish components to gchr.io
+        # only publish tags and pre-releases from main
+        if: startsWith(github.ref, 'refs/tags/') || (github.ref == 'refs/heads/main' && contains(steps.interface_version.outputs.VERSION, '-'))
+        run: make publish
+        env:
+          REPOSITORY: "ghcr.io/${{ github.repository }}"
+          VERSION: "${{ case(github.ref == 'refs/heads/main', steps.interface_version.outputs.VERSION, steps.tag_version.outputs.VERSION) }}"
+      - name: Draft GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          files: |
+            lib/*.wasm
+            components.tar
+          fail_on_unmatched_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}

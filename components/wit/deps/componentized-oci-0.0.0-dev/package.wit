@@ -1,0 +1,287 @@
+package componentized:oci@0.0.0-dev;
+
+interface client {
+  use wasi:clocks/system-clock@0.3.0.{instant};
+
+  variant retry-after {
+    date(instant),
+    delay-seconds(u32),
+  }
+
+  variant error-code {
+    /// blob unknown to registry (code-1 `BLOB_UNKNOWN`)
+    blob-unknown(string),
+    /// blob upload invalid (code-2 `BLOB_UPLOAD_INVALID`)
+    blob-upload-invalid(string),
+    /// blob upload unknown to registry (code-3`BLOB_UPLOAD_UNKNOWN`)
+    blob-upload-unknown(string),
+    /// provided digest did not match uploaded content (code-4 `DIGEST_INVALID`)
+    digest-invalid(string),
+    /// manifest references a manifest or blob unknown to registry (code-5 `MANIFEST_BLOB_UNKNOWN`)
+    manifest-blob-unknown(string),
+    /// manifest invalid (code-6 `MANIFEST_INVALID`)
+    manifest-invalid(string),
+    /// manifest unknown to registry (code-7 `MANIFEST_UNKNOWN`)
+    manifest-unknown(string),
+    /// invalid repository name (code-8 `NAME_INVALID`)
+    name-invalid(string),
+    /// repository name not known to registry (code-9 `NAME_UNKNOWN`)
+    name-unknown(string),
+    /// provided length did not match content length (code-10 `SIZE_INVALID`)
+    size-invalid(string),
+    /// authentication required (code-11 `UNAUTHORIZED`)
+    unauthorized(string),
+    /// requested access to the resource is denied (code-12 `DENIED`)
+    denied(string),
+    /// the operation is unsupported (code-13 `UNSUPPORTED`)
+    unsupported(string),
+    /// too many requests (code-14 `TOOMANYREQUESTS`)
+    toomanyrequests(option<retry-after>),
+    /// other
+    other(option<string>),
+  }
+
+  variant schema-version {
+    v2,
+    other(option<u8>),
+  }
+
+  variant media-type-suffix {
+    /// json encoded
+    json,
+    /// compressed with gzip
+    gzip,
+    /// compressed with zstd
+    zstd,
+    /// other encoding
+    other(option<string>),
+  }
+
+  /// common media types for oci artifacts
+  variant media-type {
+    /// content descriptor
+    application-vnd-oci-descriptor-v1(media-type-suffix),
+    /// oci layout
+    application-vnd-oci-layout-header-v1(media-type-suffix),
+    /// image index
+    application-vnd-oci-image-index-v1(media-type-suffix),
+    /// image manifest
+    application-vnd-oci-image-manifest-v1(media-type-suffix),
+    /// image config
+    application-vnd-oci-image-config-v1(media-type-suffix),
+    /// layer, as a tar archive
+    application-vnd-oci-image-layer-v1-tar(media-type-suffix),
+    /// empty for unused descriptors
+    application-vnd-oci-empty-v1(media-type-suffix),
+    /// layer, as a tar archive
+    application-vnd-oci-image-layer-nondistributable-v1-tar(media-type-suffix),
+    /// wasm config
+    application-vnd-wasm-config-v0(media-type-suffix),
+    /// wasm
+    application-wasm,
+    /// other
+    other(string),
+  }
+
+  record oci-image-index-manifest-v1-manifest-platform {
+    /// CPU architecture which the binaries in this image are built to run on
+    architecture: string,
+    /// name of the operating system which the image is built to run on
+    os: string,
+    /// version of the operating system
+    os-version: option<string>,
+    /// mandatory OS features
+    os-features: option<list<string>>,
+    /// variant of the CPU
+    %variant: option<string>,
+  }
+
+  record oci-image-config-v1-config {
+    /// username or UID which is a platform-specific structure that allows specific control over which user the process run as
+    user: option<string>,
+    /// set of ports to expose from a container running this image
+    exposed-ports: option<list<string>>,
+    /// values act as defaults and are merged with any specified when creating a container
+    env: option<list<string>>,
+    /// arguments to use as the command to execute when the container starts
+    entrypoint: option<list<string>>,
+    /// arguments to the entrypoint of the container
+    cmd: option<list<string>>,
+    /// directories describing where the process is likely to write data specific to a container instance
+    volumes: option<list<string>>,
+    /// current working directory of the entrypoint process in the container
+    working-dir: option<string>,
+    /// arbitrary metadata for the container
+    labels: option<map<string, string>>,
+    /// system call signal that will be sent to the container to exit
+    stop-signal: option<string>,
+    /// deprecated: present only for legacy compatibility
+    args-escaped: option<bool>,
+  }
+
+  record oci-image-config-v1-content-addresses {
+    /// must be 'layers'
+    %type: string,
+    /// layer content hashes, in order from first to last
+    diff-ids: list<string>,
+  }
+
+  record oci-image-config-v1-history-entry {
+    /// combined date and time at which the layer was created
+    created: option<instant>,
+    /// author of the build point
+    author: option<string>,
+    /// command which created the layer
+    created-by: option<string>,
+    /// custom message set when creating the layer
+    comment: option<string>,
+    /// mark if the history item created a filesystem diff
+    empty-layer: option<bool>,
+  }
+
+  record oci-image-config-v1 {
+    /// combined date and time at which the image was created
+    created: option<instant>,
+    /// name and/or email address of the person or entity which created and is responsible for maintaining the image
+    author: option<string>,
+    /// CPU architecture which the binaries in this image are built to run on
+    architecture: string,
+    /// name of the operating system which the image is built to run on
+    os: string,
+    /// version of the operating system
+    os-version: option<string>,
+    /// mandatory OS features
+    os-features: option<list<string>>,
+    /// variant of the specified CPU architecture
+    %variant: option<string>,
+    /// execution parameters which should be used as a base when running a container using the image
+    config: option<oci-image-config-v1-config>,
+    /// layer content addresses used by the image
+    rootfs: oci-image-config-v1-content-addresses,
+    /// history of each layer. The array is ordered from first to last
+    history: option<list<oci-image-config-v1-history-entry>>,
+  }
+
+  record wasm-config-v0-component {
+    exports: list<string>,
+    imports: list<string>,
+    target: option<string>,
+  }
+
+  record digest {
+    algorithm: string,
+    encoded: string,
+  }
+
+  record oci-descriptor-v1 {
+    /// media type of the referenced content
+    media-type: media-type,
+    /// digest of the targeted content
+    digest: digest,
+    /// size, in bytes, of the raw content
+    size: u64,
+    /// list of URIs from which this object MAY be downloaded
+    urls: option<list<string>>,
+    /// arbitrary metadata for this descriptor
+    annotations: option<map<string, string>>,
+  }
+
+  record oci-image-manifest-v1 {
+    /// manifest schema version
+    schema-version: schema-version,
+    /// must contain the media type 'application/vnd.oci.image.manifest.v1+json'.
+    media-type: media-type,
+    /// type of an artifact when the manifest is used for an artifact
+    artifact-type: option<media-type>,
+    /// configuration object for a container
+    config: oci-descriptor-v1,
+    /// list of layer descriptors
+    layers: list<oci-descriptor-v1>,
+    /// weak association to another manifest
+    subject: option<oci-descriptor-v1>,
+    /// arbitrary metadata for the image manifest
+    annotations: option<map<string, string>>,
+  }
+
+  record oci-image-index-manifest-v1-manifest {
+    /// media type of the subject manifest
+    media-type: media-type,
+    /// minimum runtime requirements of the image
+    platform: option<oci-image-index-manifest-v1-manifest-platform>,
+    /// descriptor of another manifest
+    subject: option<oci-descriptor-v1>,
+    /// arbitrary metadata for the image manifest
+    annotations: option<map<string, string>>,
+  }
+
+  record oci-image-index-manifest-v1 {
+    /// manifest schema version
+    schema-version: schema-version,
+    /// must contain the media type 'application/vnd.oci.image.index.v1+json'.
+    media-type: media-type,
+    /// type of an artifact when the manifest is used for an artifact
+    artifact-type: option<media-type>,
+    /// manifests for specific platforms
+    manifests: list<oci-image-index-manifest-v1-manifest>,
+    /// weak association to another manifest
+    subject: option<oci-descriptor-v1>,
+    /// arbitrary metadata for the image manifest
+    annotations: option<map<string, string>>,
+  }
+
+  variant manifest {
+    /// oci image
+    oci-image-v1(oci-image-manifest-v1),
+    /// oci image index
+    oci-image-index-v1(oci-image-index-manifest-v1),
+    /// other
+    other(list<u8>),
+  }
+
+  record wasm-config-v0 {
+    /// combined date and time at which the image was created
+    created: option<instant>,
+    /// name and/or email address of the person or entity which created and is responsible for maintaining the image
+    author: option<string>,
+    /// must match a GOARCH value
+    architecture: string,
+    /// must match a GOOS value
+    os: string,
+    /// digests of the layers in the same order
+    layer-digests: list<digest>,
+    /// component metadata
+    component: option<wasm-config-v0-component>,
+  }
+
+  variant config {
+    /// oci iamge
+    oci-image-v1(oci-image-config-v1),
+    /// wasm module
+    wasm-v0(wasm-config-v0),
+    /// other
+    other(list<u8>),
+  }
+
+  record reference {
+    registry: string,
+    repository: string,
+    tag: option<string>,
+    digest: option<digest>,
+  }
+
+  parse-reference: func(reference: string) -> result<reference, error-code>;
+
+  resolve-digest: async func(reference: reference) -> result<digest, error-code>;
+
+  get-blob: async func(reference: reference) -> result<list<u8>, error-code>;
+
+  get-config: async func(reference: reference) -> result<config, error-code>;
+
+  get-manifest: async func(reference: reference) -> result<manifest, error-code>;
+}
+
+world imports {
+  import wasi:clocks/types@0.3.0;
+  import wasi:clocks/system-clock@0.3.0;
+  import client;
+}

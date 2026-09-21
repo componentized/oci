@@ -1,0 +1,6 @@
+package componentized:oci-components;
+
+world client {
+    import componentized:http/client@0.1.0-dev;
+    export componentized:oci/client@0.0.0-dev;
+}

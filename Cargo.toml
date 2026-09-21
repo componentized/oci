@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "components/*",
+]
+exclude = [
+    "components/wit",
+]
+
+[workspace.dependencies]
+chrono = { git = "https://github.com/chronotope/chrono.git", branch = "0.5.x" }
+httpdate = "1.0"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+url = "2.5"
+wit-bindgen = "0.61.0"
