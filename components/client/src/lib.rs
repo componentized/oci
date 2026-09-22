@@ -246,17 +246,19 @@ impl OCIClient {
     }
 
     fn compute_digest(algorithm: &str, bytes: &[u8]) -> Result<Digest, ErrorCode> {
+        fn hash_hex<D: sha2::Digest>(bytes: &[u8]) -> String {
+            let mut hasher = D::new();
+            hasher.update(bytes);
+            hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+
         let encoded = match algorithm {
-            "sha256" => {
-                let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-                sha2::Digest::update(&mut hasher, bytes);
-                format!("{:x}", sha2::Digest::finalize(hasher))
-            }
-            "sha512" => {
-                let mut hasher = <sha2::Sha512 as sha2::Digest>::new();
-                sha2::Digest::update(&mut hasher, bytes);
-                format!("{:x}", sha2::Digest::finalize(hasher))
-            }
+            "sha256" => hash_hex::<sha2::Sha256>(bytes),
+            "sha512" => hash_hex::<sha2::Sha512>(bytes),
             _ => Err(ErrorCode::DigestInvalid(format!(
                 "unsupported algorithm: {}",
                 algorithm
