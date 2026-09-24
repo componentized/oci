@@ -119,13 +119,6 @@ interface client {
     args-escaped: option<bool>,
   }
 
-  record oci-image-config-v1-content-addresses {
-    /// must be 'layers'
-    %type: string,
-    /// layer content hashes, in order from first to last
-    diff-ids: list<string>,
-  }
-
   record oci-image-config-v1-history-entry {
     /// combined date and time at which the layer was created
     created: option<instant>,
@@ -137,29 +130,6 @@ interface client {
     comment: option<string>,
     /// mark if the history item created a filesystem diff
     empty-layer: option<bool>,
-  }
-
-  record oci-image-config-v1 {
-    /// combined date and time at which the image was created
-    created: option<instant>,
-    /// name and/or email address of the person or entity which created and is responsible for maintaining the image
-    author: option<string>,
-    /// CPU architecture which the binaries in this image are built to run on
-    architecture: string,
-    /// name of the operating system which the image is built to run on
-    os: string,
-    /// version of the operating system
-    os-version: option<string>,
-    /// mandatory OS features
-    os-features: option<list<string>>,
-    /// variant of the specified CPU architecture
-    %variant: option<string>,
-    /// execution parameters which should be used as a base when running a container using the image
-    config: option<oci-image-config-v1-config>,
-    /// layer content addresses used by the image
-    rootfs: oci-image-config-v1-content-addresses,
-    /// history of each layer. The array is ordered from first to last
-    history: option<list<oci-image-config-v1-history-entry>>,
   }
 
   record wasm-config-v0-component {
@@ -184,6 +154,10 @@ interface client {
     urls: option<list<string>>,
     /// arbitrary metadata for this descriptor
     annotations: option<map<string, string>>,
+    /// embedded representation of the referenced content
+    data: option<string>,
+    /// type of an artifact when the descriptor points to an artifact
+    artifact-type: option<media-type>,
   }
 
   record oci-image-manifest-v1 {
@@ -204,14 +178,24 @@ interface client {
   }
 
   record oci-image-index-manifest-v1-manifest {
-    /// media type of the subject manifest
+    /// media type of the referenced content
     media-type: media-type,
+    /// digest of the targeted content
+    digest: digest,
+    /// size, in bytes, of the raw content
+    size: u64,
+    /// list of URIs from which this object MAY be downloaded
+    urls: option<list<string>>,
+    /// arbitrary metadata for this descriptor
+    annotations: option<map<string, string>>,
+    /// embedded representation of the referenced content
+    data: option<string>,
+    /// type of an artifact when the descriptor points to an artifact
+    artifact-type: option<media-type>,
     /// minimum runtime requirements of the image
     platform: option<oci-image-index-manifest-v1-manifest-platform>,
     /// descriptor of another manifest
     subject: option<oci-descriptor-v1>,
-    /// arbitrary metadata for the image manifest
-    annotations: option<map<string, string>>,
   }
 
   record oci-image-index-manifest-v1 {
@@ -236,6 +220,36 @@ interface client {
     oci-image-index-v1(oci-image-index-manifest-v1),
     /// other
     other(list<u8>),
+  }
+
+  record oci-image-config-v1-content-addresses {
+    /// must be 'layers'
+    %type: string,
+    /// layer content hashes, in order from first to last
+    diff-ids: list<digest>,
+  }
+
+  record oci-image-config-v1 {
+    /// combined date and time at which the image was created
+    created: option<instant>,
+    /// name and/or email address of the person or entity which created and is responsible for maintaining the image
+    author: option<string>,
+    /// CPU architecture which the binaries in this image are built to run on
+    architecture: string,
+    /// name of the operating system which the image is built to run on
+    os: string,
+    /// version of the operating system
+    os-version: option<string>,
+    /// mandatory OS features
+    os-features: option<list<string>>,
+    /// variant of the specified CPU architecture
+    %variant: option<string>,
+    /// execution parameters which should be used as a base when running a container using the image
+    config: option<oci-image-config-v1-config>,
+    /// layer content addresses used by the image
+    rootfs: oci-image-config-v1-content-addresses,
+    /// history of each layer. The array is ordered from first to last
+    history: option<list<oci-image-config-v1-history-entry>>,
   }
 
   record wasm-config-v0 {
@@ -275,7 +289,7 @@ interface client {
 
   get-blob: async func(reference: reference) -> result<list<u8>, error-code>;
 
-  get-config: async func(reference: reference) -> result<config, error-code>;
+  get-config: async func(reference: reference, default-media-type: option<media-type>) -> result<config, error-code>;
 
   get-manifest: async func(reference: reference) -> result<manifest, error-code>;
 }
