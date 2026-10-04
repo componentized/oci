@@ -160,7 +160,7 @@ impl OCIClient {
         url: String,
         mut headers: Vec<(String, String)>,
     ) -> Result<HttpResponse, ErrorCode> {
-        let response = Self::get_with_redirects(url.clone(), headers.clone()).await?;
+        let response = http::get(url.clone(), headers.clone(), None).await?;
         if response.status != 401 {
             return Ok(response);
         }
@@ -184,47 +184,7 @@ impl OCIClient {
         headers.push(("Authorization".to_string(), format!("Bearer {token}")));
 
         // a second 401 is returned to the caller and decoded as a transport error
-        Self::get_with_redirects(url, headers).await
-    }
-
-    /// Issues a GET request, following redirects (e.g. registries redirecting
-    /// blob downloads to a CDN). The `Authorization` header is dropped when a
-    /// redirect leaves the original origin, as pre-signed storage URLs reject
-    /// unexpected credentials and the token must not leak to other hosts.
-    async fn get_with_redirects(
-        url: String,
-        mut headers: Vec<(String, String)>,
-    ) -> Result<HttpResponse, ErrorCode> {
-        const MAX_REDIRECTS: usize = 10;
-
-        let mut url = Url::parse(&url)
-            .map_err(|e| ErrorCode::Other(Some(format!("invalid url {url}: {e}"))))?;
-        for _ in 0..=MAX_REDIRECTS {
-            let response = http::get(url.to_string(), headers.clone(), None).await?;
-            if !matches!(response.status, 301 | 302 | 303 | 307 | 308) {
-                return Ok(response);
-            }
-            let Some(location) = response
-                .headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("location"))
-                .map(|(_, v)| v.clone())
-            else {
-                return Ok(response);
-            };
-
-            let next = url.join(&location).map_err(|e| {
-                ErrorCode::Other(Some(format!("invalid redirect location {location}: {e}")))
-            })?;
-            if next.origin() != url.origin() {
-                headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
-            }
-            url = next;
-        }
-
-        Err(ErrorCode::Other(Some(format!(
-            "too many redirects, stopped at {url}"
-        ))))
+        Ok(http::get(url, headers, None).await?)
     }
 
     async fn fetch_token(params: &BTreeMap<String, String>) -> Result<String, ErrorCode> {
@@ -243,7 +203,7 @@ impl OCIClient {
         }
 
         let http::HttpResponse { status, body, .. } =
-            Self::get_with_redirects(url.to_string(), vec![]).await?;
+            http::get(url.to_string(), vec![], None).await?;
         let body = body.collect().await;
         if status != 200 {
             return Err(ErrorCode::Unauthorized(format!(
@@ -1156,6 +1116,12 @@ struct TransportError {
 impl From<http::ErrorCode> for ErrorCode {
     fn from(value: http::ErrorCode) -> Self {
         match value {
+            http::ErrorCode::RedirectLimitExceeded((_, count)) => Self::Other(Some(format!(
+                "too many redirects, stopped after {count}"
+            ))),
+            http::ErrorCode::RedirectRequiresBody(_) => Self::Other(Some(
+                "redirect requires resending the request body".to_string(),
+            )),
             http::ErrorCode::Other(message) => Self::Other(message),
         }
     }

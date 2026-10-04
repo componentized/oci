@@ -17,12 +17,11 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@main
-      - name: Install wasmtime
-        run: cargo binstall --force wasmtime-cli
-      - name: Install wkg
-        run: cargo binstall --force wkg
-      - name: Install wasm-tools
-        run: cargo binstall --force wasm-tools
+      - name: Install tools
+        # the versions pinned in tools/Cargo.toml, on the path for later steps
+        run: |
+          make tools
+          make -s tools-path >> "${GITHUB_PATH}"
       - name: Sync wit
         run: make wit
       - name: Check for drift in generated wit
@@ -30,8 +29,8 @@ jobs:
       - name: Build components
         run: make components
       - name: Collect components.tar
-        run: tar -cvf ../components.tar *.wasm*
-        working-directory: ./lib
+        run: tar -cvf ../../components.tar .
+        working-directory: ./target/components
       - name: Upload components.tar
         uses: actions/upload-artifact@v7
         with:
@@ -41,12 +40,20 @@ jobs:
       - name: Test
         run: make test
       - name: Capture WIT
-        working-directory: ./lib
+        working-directory: ./target/components
         run: |
-          for component in *.wasm ; do
-            echo "::group::${component} ($(du -h ${component} | cut -f1 ))"
-              wasm-tools component wit "${component}"
-            echo "::endgroup::"
+          dump_wit() {
+            echo "::group::$(basename "$1") ($(du -h "$1" | awk '{print $1}' ))"
+              wasm-tools component wit "$1"
+            echo "::endgroup::"          
+          }
+
+          # print interface.wasm first
+          if [ -f interface.wasm ] ; then
+            dump_wit interface.wasm
+          fi
+          for component in $(find . -name '*.wasm' -not -name '*.debug.wasm' -not -name 'interface.wasm' | sort) ; do
+            dump_wit "${component}"
           done
 
   publish:
@@ -63,10 +70,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@main
-      - name: Install wkg
-        run: cargo binstall --force wkg
-      - name: Install wasm-tools
-        run: cargo binstall --force wasm-tools
+      - name: Install tools
+        run: |
+          make tools
+          make -s tools-path >> "${GITHUB_PATH}"
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
       - name: Download components.tar
@@ -74,10 +81,10 @@ jobs:
         with:
           name: components.tar
       - name: Extract components
-        run: tar -xvf components.tar -C lib
+        run: mkdir -p target/components && tar -xvf components.tar -C target/components
       - name: Get interface version
         id: interface_version
-        run: echo "VERSION=$( wasm-tools component wit lib/interface.wasm --json | jq -r "[.packages[] | select(.name | contains(\"${GITHUB_REPOSITORY/\//:}@\"))][0].name" | cut -d'@' -f2 )" >> $GITHUB_OUTPUT
+        run: echo "VERSION=$( wasm-tools component wit target/components/interface.wasm --json | jq -r "[.packages[] | select(.name | contains(\"${GITHUB_REPOSITORY/\//:}@\"))][0].name" | cut -d'@' -f2 )" >> $GITHUB_OUTPUT
       - name: Get tag version
         if: startsWith(github.ref, 'refs/tags/')
         id: tag_version
@@ -101,7 +108,8 @@ jobs:
         with:
           draft: true
           files: |
-            lib/*.wasm
+            target/components/*.wasm
+            target/components/*/*.wasm
             components.tar
           fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,10 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "components/*",
-]
-exclude = [
-    "components/wit",
+    "components/client",
 ]
 
 [workspace.dependencies]

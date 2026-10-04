@@ -1,10 +1,8 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/rust
 {
-	"name": "oci",
-	"build": {
-		"dockerfile": "Dockerfile"
-	},
+	"name": "componentized-oci",
+	"image": "mcr.microsoft.com/devcontainers/rust",
 	// Use 'mounts' to make the cargo cache persistent in a Docker Volume.
 	"mounts": [
 		{
@@ -23,7 +21,7 @@
 		"ghcr.io/devcontainers/features/github-cli:1": {}
 	},
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "cargo check",
+	"postCreateCommand": "./scripts/init-devcontainer.sh",
 	// Configure tool-specific properties.
 	"customizations": {
 		// Configure properties specific to VS Code.

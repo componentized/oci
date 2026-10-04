@@ -1,3 +1,6 @@
 /components.tar
 /target
 .DS_Store
+/tools/Cargo.lock
+# wit dependencies, fetched by `make wit` from the wkg.toml and wkg.lock files
+**/wit/deps/
