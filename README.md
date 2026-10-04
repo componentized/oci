@@ -31,6 +31,7 @@ The cli tools the build uses, [`wasm-tools`](https://github.com/bytecodealliance
 ### Components
 
 - [`client`](./components/client/)
+- [`media-types`](./components/media-types/)
 
 ## Community
 
