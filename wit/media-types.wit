@@ -1,0 +1,58 @@
+/// Common OCI related media types
+@since(version = 0.1.0-dev)
+interface media-types {
+    /// Content Descriptor
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.descriptor.v1+json"
+    application-vnd-oci-descriptor-v1-json: func() -> string;
+
+    /// OCI Layout
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.layout.header.v1+json"
+    application-vnd-oci-layout-header-v1-json: func() -> string;
+
+    /// Image Index
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.image.index.v1+json"
+    application-vnd-oci-image-index-v1-json: func() -> string;
+
+    /// Image manifest
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.image.manifest.v1+json"
+    application-vnd-oci-image-manifest-v1-json: func() -> string;
+
+    /// Image config
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.image.config.v1+json"
+    application-vnd-oci-image-config-v1-json: func() -> string;
+
+    /// "Layer", as a tar archive
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.image.layer.v1.tar"
+    application-vnd-oci-image-layer-v1-tar: func() -> string;
+
+    /// "Layer", as a tar archive compressed with gzip
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.image.layer.v1.tar+gzip"
+    application-vnd-oci-image-layer-v1-tar-gzip: func() -> string;
+
+    /// "Layer", as a tar archive compressed with zstd
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.image.layer.v1.tar+zstd"
+    application-vnd-oci-image-layer-v1-tar-zstd: func() -> string;
+
+    /// Empty for unused descriptors
+    /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types
+    /// @value "application/vnd.oci.empty.v1+json"
+    application-vnd-oci-empty-v1-json: func() -> string;
+
+    /// WASM config
+    /// https://tag-runtime.cncf.io/wgs/wasm/deliverables/wasm-oci-artifact/#configmediatype-applicationvndwasmconfigv0json
+    /// @value "application/vnd.wasm.config.v0+json"
+    application-vnd-wasm-config-v0-json: func() -> string;
+
+    /// WASM
+    /// https://www.iana.org/assignments/media-types/application/wasm
+    /// @value "application/wasm"
+    application-wasm: func() -> string;
+}
