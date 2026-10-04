@@ -9,7 +9,7 @@ registry = "componentized.dev"
 [[packages.versions]]
 requirement = "=0.1.0-dev"
 version = "0.1.0-dev"
-digest = "sha256:1c43656521dfd238a67af2288f7abcf67e2ebd950352a90c396dcf11b25c4440"
+digest = "sha256:f74b53af4b5ecb4c77e8bd47887920e0626efb2e45e8a9386f2519910faf5e5c"
 
 [[packages]]
 name = "wasi:clocks"
