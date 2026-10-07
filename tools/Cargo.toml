@@ -16,7 +16,7 @@ path = "lib.rs"
 componentized-constants-cli = "=0.1.0-dev"
 static-config = "=0.2.0"
 wac-cli = "=0.12.0"
-wasm-tools = "=1.260.0"
+wasm-tools = "=1.261.0"
 wasmtime-cli = "=49.0.2"
 wkg = "=0.16.1"
 
