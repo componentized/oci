@@ -1,8 +1,7 @@
 #![cfg_attr(not(test), no_main)]
 
-use std::{collections::BTreeMap, fmt::Display, time::UNIX_EPOCH};
+use std::{collections::BTreeMap, fmt::Display, ops::RangeInclusive, time::UNIX_EPOCH};
 
-use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest as _;
@@ -195,8 +194,7 @@ impl OCIClient {
 
         let mut reference = Self::parse_repository_reference(base)?;
         if tag != "" {
-            let re = Regex::new(r"^[a-zA-Z0-9_\-.]{1,128}$").unwrap();
-            if !re.is_match(&tag) {
+            if !is_tag(&tag) {
                 Err(ErrorCode::Other(Some(format!("invalid tag format: {tag}"))))?
             }
             reference.tag = Some(tag);
@@ -232,8 +230,7 @@ impl OCIClient {
 
         match algorithm.as_str() {
             "sha256" => {
-                let re = Regex::new(r"^[a-f0-9]{64}$").unwrap();
-                if !re.is_match(&encoded) {
+                if !is_lower_hex(&encoded, 64) {
                     Err(ErrorCode::Other(Some(format!(
                         "invalid checksum digest format: {encoded}"
                     ))))?
@@ -244,8 +241,7 @@ impl OCIClient {
                 })
             }
             "sha512" => {
-                let re = Regex::new(r"^[a-f0-9]{128}$").unwrap();
-                if !re.is_match(&encoded) {
+                if !is_lower_hex(&encoded, 128) {
                     Err(ErrorCode::Other(Some(format!(
                         "invalid checksum digest format: {encoded}"
                     ))))?
@@ -291,12 +287,7 @@ impl OCIClient {
             repository = format!("library/{repository}");
         }
 
-        if !Regex::new(r"^[a-z0-9_\-./]{1,255}$")
-            .unwrap()
-            .is_match(&repository)
-            || repository.starts_with('/')
-            || repository.ends_with('/')
-        {
+        if !is_repository(&repository) || repository.starts_with('/') || repository.ends_with('/') {
             Err(ErrorCode::Other(Some(format!(
                 "invalid repository format: {repository}"
             ))))?
@@ -1221,6 +1212,32 @@ impl DigestHasher {
     }
 }
 
+/// Whether every byte of the value is allowed and its length is within the range, the same as an
+/// anchored regex of a single ASCII character class, e.g. `^[a-f0-9]{64}$`. A non-ASCII
+/// character is never allowed, so the length in bytes is the length in characters.
+fn is_ascii_class(value: &str, len: RangeInclusive<usize>, allowed: impl Fn(u8) -> bool) -> bool {
+    len.contains(&value.len()) && value.bytes().all(allowed)
+}
+
+/// A tag, `^[a-zA-Z0-9_\-.]{1,128}$`
+fn is_tag(value: &str) -> bool {
+    is_ascii_class(value, 1..=128, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
+    })
+}
+
+/// The encoded value of a digest, `^[a-f0-9]{len}$`
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    is_ascii_class(value, len..=len, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The characters of a repository, `^[a-z0-9_\-./]{1,255}$`
+fn is_repository(value: &str) -> bool {
+    is_ascii_class(value, 1..=255, |b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.' | b'/')
+    })
+}
+
 impl From<http::ErrorCode> for ErrorCode {
     fn from(value: http::ErrorCode) -> Self {
         match value {
@@ -1590,6 +1607,53 @@ mod tests {
         Err(ErrorCode::Other(Some(format!(
             "could not parse reference: {reference}"
         ))))
+    }
+
+    #[test]
+    fn test_ascii_classes_match_regex() {
+        use regex::Regex;
+
+        let checks: [(&str, fn(&str) -> bool); 4] = [
+            (r"^[a-zA-Z0-9_\-.]{1,128}$", is_tag),
+            (r"^[a-f0-9]{64}$", |v| is_lower_hex(v, 64)),
+            (r"^[a-f0-9]{128}$", |v| is_lower_hex(v, 128)),
+            (r"^[a-z0-9_\-./]{1,255}$", is_repository),
+        ];
+
+        // every character class boundary, and characters a regex could treat differently
+        let alphabet: Vec<char> = "09afgzAFGZ_-./:@ \n\t\0\x7féÅ☃🦀ａ０".chars().collect();
+        let mut inputs: Vec<String> = vec![String::new()];
+        for len in [1, 2, 63, 64, 65, 127, 128, 129, 254, 255, 256] {
+            for c in &alphabet {
+                inputs.push(c.to_string().repeat(len));
+                // a valid prefix and a single other character at the end, e.g. a trailing newline
+                inputs.push(format!("{}{c}", "a".repeat(len - 1)));
+                inputs.push(format!("{c}{}", "a".repeat(len - 1)));
+            }
+        }
+        // deterministic pseudo-random mixes of the alphabet
+        let mut state: u64 = 0x2545f4914f6cdd1d;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = (state % 300) as usize;
+            let input = (0..len)
+                .map(|i| alphabet[((state >> (i % 48)) as usize + i) % alphabet.len()])
+                .collect();
+            inputs.push(input);
+        }
+
+        for (pattern, check) in checks {
+            let re = Regex::new(pattern).unwrap();
+            for input in &inputs {
+                assert_eq!(
+                    check(input),
+                    re.is_match(input),
+                    "{pattern} disagrees for {input:?}"
+                );
+            }
+        }
     }
 
     #[test]
