@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "components/client",
+    "crates/test-harness",
 ]
 
 [workspace.dependencies]
@@ -11,5 +12,9 @@ regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
+test-harness = { path = "./crates/test-harness" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 url = "2.5"
+wasmtime = { version = "49", features = ["component-model-async"] }
+wasmtime-wasi = { version = "49", features = ["p3"] }
 wit-bindgen = "0.62.0"

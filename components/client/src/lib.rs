@@ -1,27 +1,34 @@
 #![cfg_attr(not(test), no_main)]
 
-use std::{collections::BTreeMap, fmt::Display, time::UNIX_EPOCH};
+use std::{collections::BTreeMap, fmt::Display, ops::RangeInclusive, time::UNIX_EPOCH};
 
-use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::Digest as _;
 use url::Url;
-use wit_bindgen::StreamReader;
+use wit_bindgen::{FutureReader, StreamReader, StreamResult};
 
 use crate::{
     componentized::http::client::{self as http, HttpResponse},
     exports::componentized::oci::client::{
-        Config, Digest, ErrorCode, Guest, Instant, Manifest,
+        Config, Digest, DigestAlgorithm, ErrorCode, Guest, Instant, Manifest,
         MediaType::{self, Other},
         MediaTypeSuffix, OciDescriptorV1, OciImageConfigV1, OciImageConfigV1Config,
         OciImageConfigV1ContentAddresses, OciImageConfigV1HistoryEntry, OciImageIndexManifestV1,
         OciImageIndexManifestV1Manifest, OciImageIndexManifestV1ManifestPlatform,
-        OciImageManifestV1, Reference, RetryAfter, SchemaVersion, WasmConfigV0,
-        WasmConfigV0Component,
+        OciImageManifestV1, Reference, RetryAfter, WasmConfigV0, WasmConfigV0Component,
     },
 };
 
 pub(crate) struct OCIClient;
+
+/// the size of each read from the registry while streaming a blob
+const BLOB_CHUNK_SIZE: usize = 64 * 1024;
+
+/// the manifest media types the client accepts, a registry may serve a different manifest for a
+/// tag depending on the media types accepted
+const MANIFEST_ACCEPT: &str =
+    "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json";
 
 impl Guest for OCIClient {
     #[allow(async_fn_in_trait)]
@@ -42,60 +49,58 @@ impl Guest for OCIClient {
 
     #[allow(async_fn_in_trait)]
     async fn resolve_digest(reference: Reference) -> Result<Digest, ErrorCode> {
-        let Reference {
-            registry,
-            repository,
-            tag,
-            digest,
-        } = reference;
-
+        let (url, digest) = Self::manifest_url(reference);
         if let Some(digest) = digest {
             return Ok(digest);
         }
+        let headers = vec![("Accept".to_string(), MANIFEST_ACCEPT.to_string())];
 
-        let tag = tag.unwrap_or("latest".to_string());
-        let url = format!("https://{registry}/v2/{repository}/manifests/{tag}");
-        let http::HttpResponse {
-            status,
-            headers,
-            body,
-            ..
-        } = Self::get(url, vec![]).await?;
+        // the same manifest `get-manifest` gets for the tag
+        let bytes = Transport::fetch(url, headers, None)
+            .await?
+            .collect()
+            .await?;
 
-        match status {
-            200 => Self::compute_digest("sha256", &body.collect().await),
-            _ => Err(Self::decode_transport_error(body, status, headers).await),
-        }
+        let mut hasher = DigestHasher::new(&DigestAlgorithm::Sha256)?;
+        hasher.update(&bytes);
+        Ok(hasher.finalize())
     }
 
     #[allow(async_fn_in_trait)]
-    async fn get_blob(reference: Reference) -> Result<Vec<u8>, ErrorCode> {
-        let Reference {
-            registry,
-            repository,
-            tag: _,
-            digest,
-        } = reference;
-        let digest = match digest {
-            Some(digest) => digest,
-            None => Err(ErrorCode::BlobUnknown("digest required".to_string()))?,
-        };
-        let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
-        let http::HttpResponse {
-            status,
-            headers,
-            body,
-            ..
-        } = Self::get(url, vec![]).await?;
+    async fn get_blob(
+        reference: Reference,
+    ) -> Result<(StreamReader<u8>, FutureReader<Result<(), ErrorCode>>), ErrorCode> {
+        let (url, digest) = Self::blob_url(reference)?;
+        let mut blob = Transport::fetch(url, vec![], Some(digest)).await?;
 
-        let raw = match status {
-            200 => Ok(body.collect().await),
-            _ => Err(Self::decode_transport_error(body, status, headers).await),
-        }?;
+        let (mut content_tx, content_rx) = wit_stream::new();
+        // written when the task ends without verifying the content, e.g. the caller dropped the
+        // stream before reading all of the content
+        let (verified_tx, verified_rx) = wit_future::new(|| {
+            Err(ErrorCode::DigestInvalid(
+                "blob content was not verified, the stream ended early".to_string(),
+            ))
+        });
+        wit_bindgen::spawn_local(async move {
+            let verified = loop {
+                match blob.next().await {
+                    Ok(Some(chunk)) => {
+                        if !content_tx.write_all(chunk).await.is_empty() {
+                            // the caller dropped the stream
+                            return;
+                        }
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(err) => break Err(err),
+                }
+            };
+            // the stream ends before the future resolves, a caller reads to the end of the
+            // stream and then awaits the future
+            drop(content_tx);
+            verified_tx.write(verified).await.ok();
+        });
 
-        Self::assert_digest(digest, &raw)?;
-
-        Ok(raw)
+        Ok((content_rx, verified_rx))
     }
 
     #[allow(async_fn_in_trait)]
@@ -103,7 +108,12 @@ impl Guest for OCIClient {
         reference: Reference,
         default_media_type: Option<MediaType>,
     ) -> Result<Config, ErrorCode> {
-        let blob = Self::get_blob(reference).await?;
+        // configs are small, buffered to decode
+        let (url, digest) = Self::blob_url(reference)?;
+        let blob = Transport::fetch(url, vec![], Some(digest))
+            .await?
+            .collect()
+            .await?;
 
         Self::required(
             Self::parse_config(
@@ -117,37 +127,13 @@ impl Guest for OCIClient {
 
     #[allow(async_fn_in_trait)]
     async fn get_manifest(reference: Reference) -> Result<Manifest, ErrorCode> {
-        let Reference {
-            registry,
-            repository,
-            tag,
-            digest,
-        } = reference;
-        let version = match digest.clone() {
-            Some(digest) => digest.to_string(),
-            None => match tag {
-                Some(tag) => tag,
-                None => "latest".to_string(),
-            },
-        };
-        let url = format!("https://{registry}/v2/{repository}/manifests/{version}");
-        let http::HttpResponse {
-            status,
-            headers,
-            body,
-            ..
-        } = Self::get(url, vec![
-            ("Accept".to_string(), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json".to_string())
-        ]).await?;
-
-        let raw = match status {
-            200 => body.collect().await,
-            _ => Err(Self::decode_transport_error(body, status, headers).await)?,
-        };
-        if let Some(digest) = digest {
-            // check if manifest was requested by digest, ignore if requested by tag
-            Self::assert_digest(digest, &raw)?
-        }
+        let (url, digest) = Self::manifest_url(reference);
+        let headers = vec![("Accept".to_string(), MANIFEST_ACCEPT.to_string())];
+        // a manifest requested by tag has no digest to verify
+        let raw = Transport::fetch(url, headers, digest)
+            .await?
+            .collect()
+            .await?;
         Self::required(
             Self::parse_manifest(&serde_json::from_slice(&raw)?, "$manifest"),
             "$manifest",
@@ -156,116 +142,37 @@ impl Guest for OCIClient {
 }
 
 impl OCIClient {
-    async fn get(
-        url: String,
-        mut headers: Vec<(String, String)>,
-    ) -> Result<HttpResponse, ErrorCode> {
-        let response = http::get(url.clone(), headers.clone(), None).await?;
-        if response.status != 401 {
-            return Ok(response);
-        }
-
-        let challenge = response
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"))
-            .and_then(|(_, v)| Self::parse_www_authenticate(v));
-        let Some((scheme, params)) = challenge else {
-            return Ok(response);
+    /// The url of a blob in the registry, and its digest. The reference must be digested.
+    fn blob_url(reference: Reference) -> Result<(String, Digest), ErrorCode> {
+        let Reference {
+            registry,
+            repository,
+            tag: _,
+            digest,
+        } = reference;
+        let digest = match digest {
+            Some(digest) => digest,
+            None => Err(ErrorCode::BlobUnknown("digest required".to_string()))?,
         };
-        if !scheme.eq_ignore_ascii_case("bearer") {
-            // other schemes (e.g. basic) require credentials, which are not supported yet
-            return Ok(response);
-        }
-
-        // https://distribution.github.io/distribution/spec/auth/token/
-        let token = Self::fetch_token(&params).await?;
-        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
-        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-
-        // a second 401 is returned to the caller and decoded as a transport error
-        Ok(http::get(url, headers, None).await?)
+        let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
+        Ok((url, digest))
     }
 
-    async fn fetch_token(params: &BTreeMap<String, String>) -> Result<String, ErrorCode> {
-        let realm = params.get("realm").ok_or_else(|| {
-            ErrorCode::Unauthorized("bearer challenge is missing realm".to_string())
-        })?;
-        let mut url = Url::parse(realm)
-            .map_err(|e| ErrorCode::Unauthorized(format!("invalid token realm {realm}: {e}")))?;
-        {
-            let mut query = url.query_pairs_mut();
-            for key in ["service", "scope"] {
-                if let Some(value) = params.get(key) {
-                    query.append_pair(key, value);
-                }
-            }
-        }
-
-        let http::HttpResponse { status, body, .. } =
-            http::get(url.to_string(), vec![], None).await?;
-        let body = body.collect().await;
-        if status != 200 {
-            return Err(ErrorCode::Unauthorized(format!(
-                "token request to {realm} failed with status {status}"
-            )));
-        }
-
-        let TokenResponse {
-            token,
-            access_token,
-        } = serde_json::from_slice(&body)?;
-        token.or(access_token).ok_or_else(|| {
-            ErrorCode::Unauthorized(format!("token response from {realm} is missing token"))
-        })
-    }
-
-    /// Parses a single `WWW-Authenticate` challenge into its scheme and
-    /// lower-cased auth-params, e.g.
-    /// `Bearer realm="https://auth.example/token",service="example",scope="repository:foo:pull"`
-    fn parse_www_authenticate(value: &str) -> Option<(String, BTreeMap<String, String>)> {
-        let value = value.trim();
-        let (scheme, rest) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
-        if scheme.is_empty() {
-            return None;
-        }
-
-        let mut params = BTreeMap::new();
-        let mut chars = rest.chars().peekable();
-        loop {
-            while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
-            if chars.peek().is_none() {
-                break;
-            }
-
-            let mut key = String::new();
-            while let Some(c) = chars.next_if(|c| *c != '=' && *c != ',') {
-                key.push(c);
-            }
-            if chars.next_if_eq(&'=').is_none() {
-                // token68 or malformed param, not used by registries
-                continue;
-            }
-            while chars.next_if(|c| c.is_whitespace()).is_some() {}
-
-            let mut val = String::new();
-            if chars.next_if_eq(&'"').is_some() {
-                while let Some(c) = chars.next() {
-                    match c {
-                        '\\' => val.extend(chars.next()),
-                        '"' => break,
-                        _ => val.push(c),
-                    }
-                }
-            } else {
-                while let Some(c) = chars.next_if(|c| *c != ',') {
-                    val.push(c);
-                }
-            }
-            params.insert(key.trim().to_ascii_lowercase(), val.trim().to_string());
-        }
-
-        Some((scheme.to_string(), params))
+    /// The url of a manifest in the registry.
+    fn manifest_url(reference: Reference) -> (String, Option<Digest>) {
+        let Reference {
+            registry,
+            repository,
+            tag,
+            digest,
+        } = reference;
+        let version = match (digest.clone(), tag) {
+            (Some(digest), _) => digest.to_string(),
+            (None, Some(tag)) => tag,
+            (None, None) => "latest".to_string(),
+        };
+        let url = format!("https://{registry}/v2/{repository}/manifests/{version}");
+        (url, digest)
     }
 
     fn tag_reference(reference: String) -> Result<Reference, ErrorCode> {
@@ -287,8 +194,7 @@ impl OCIClient {
 
         let mut reference = Self::parse_repository_reference(base)?;
         if tag != "" {
-            let re = Regex::new(r"^[a-zA-Z0-9_\-.]{1,128}$").unwrap();
-            if !re.is_match(&tag) {
+            if !is_tag(&tag) {
                 Err(ErrorCode::Other(Some(format!("invalid tag format: {tag}"))))?
             }
             reference.tag = Some(tag);
@@ -324,63 +230,31 @@ impl OCIClient {
 
         match algorithm.as_str() {
             "sha256" => {
-                let re = Regex::new(r"^[a-f0-9]{64}$").unwrap();
-                if !re.is_match(&encoded) {
+                if !is_lower_hex(&encoded, 64) {
                     Err(ErrorCode::Other(Some(format!(
                         "invalid checksum digest format: {encoded}"
                     ))))?
                 }
+                Ok(Digest {
+                    algorithm: DigestAlgorithm::Sha256,
+                    encoded,
+                })
             }
             "sha512" => {
-                let re = Regex::new(r"^[a-f0-9]{128}$").unwrap();
-                if !re.is_match(&encoded) {
+                if !is_lower_hex(&encoded, 128) {
                     Err(ErrorCode::Other(Some(format!(
                         "invalid checksum digest format: {encoded}"
                     ))))?
                 }
+                Ok(Digest {
+                    algorithm: DigestAlgorithm::Sha512,
+                    encoded,
+                })
             }
-            _ => Err(ErrorCode::Other(Some(format!(
+            algorithm => Err(ErrorCode::Other(Some(format!(
                 "unsupported digest algorithm: {algorithm}"
             ))))?,
         }
-
-        Ok(Digest { algorithm, encoded })
-    }
-
-    fn compute_digest(algorithm: &str, bytes: &[u8]) -> Result<Digest, ErrorCode> {
-        fn hash_hex<D: sha2::Digest>(bytes: &[u8]) -> String {
-            let mut hasher = D::new();
-            hasher.update(bytes);
-            hasher
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
-        }
-
-        let encoded = match algorithm {
-            "sha256" => hash_hex::<sha2::Sha256>(bytes),
-            "sha512" => hash_hex::<sha2::Sha512>(bytes),
-            _ => Err(ErrorCode::DigestInvalid(format!(
-                "unsupported algorithm: {}",
-                algorithm
-            )))?,
-        };
-
-        Ok(Digest {
-            algorithm: algorithm.to_string(),
-            encoded,
-        })
-    }
-
-    fn assert_digest(expected_digest: Digest, bytes: &[u8]) -> Result<(), ErrorCode> {
-        let actual_digest = Self::compute_digest(&expected_digest.algorithm, bytes)?;
-        if expected_digest != actual_digest {
-            Err(ErrorCode::DigestInvalid(format!(
-                "digest mismatch: expected = {expected_digest}, actual = {actual_digest}",
-            )))?
-        }
-        Ok(())
     }
 
     fn parse_repository_reference(reference: String) -> Result<Reference, ErrorCode> {
@@ -413,12 +287,7 @@ impl OCIClient {
             repository = format!("library/{repository}");
         }
 
-        if !Regex::new(r"^[a-z0-9_\-./]{1,255}$")
-            .unwrap()
-            .is_match(&repository)
-            || repository.starts_with('/')
-            || repository.ends_with('/')
-        {
+        if !is_repository(&repository) || repository.starts_with('/') || repository.ends_with('/') {
             Err(ErrorCode::Other(Some(format!(
                 "invalid repository format: {repository}"
             ))))?
@@ -446,75 +315,6 @@ impl OCIClient {
             tag: None,
             digest: None,
         })
-    }
-
-    async fn decode_transport_error(
-        body: StreamReader<u8>,
-        status: u16,
-        headers: Vec<(String, String)>,
-    ) -> ErrorCode {
-        if status == 429 {
-            let after = headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("Retry-After"))
-                .map(|(_, v)| {
-                    if let Ok(seconds) = v.parse::<u32>() {
-                        return Some(RetryAfter::DelaySeconds(seconds));
-                    }
-                    if let Ok(date) = httpdate::parse_http_date(v) {
-                        let seconds = date
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                            .try_into()
-                            .unwrap();
-                        if seconds == 0 {
-                            return None;
-                        }
-                        return Some(RetryAfter::Date(Instant {
-                            seconds: seconds,
-                            nanoseconds: 0,
-                        }));
-                    }
-                    None
-                })
-                .flatten();
-            return ErrorCode::Toomanyrequests(after);
-        }
-
-        let body = body.collect().await;
-
-        let transport_errors: serde_json::Result<TransportErrors> = serde_json::from_slice(&body);
-        if transport_errors.is_err() {
-            return ErrorCode::Other(Some(format!(
-                "transport error with http status {status}: {}",
-                transport_errors.unwrap_err()
-            )));
-        }
-        let transport_errors = transport_errors.unwrap();
-        if transport_errors.errors.len() == 0 {
-            return ErrorCode::Other(Some(
-                "transport error with http status {status}: unspecified errors".to_string(),
-            ));
-        }
-        let error = transport_errors.errors.get(0).unwrap();
-
-        match error.code.as_str() {
-            "BLOB_UNKNOWN" => ErrorCode::BlobUnknown(error.message.to_string()),
-            "BLOB_UPLOAD_INVALID" => ErrorCode::BlobUploadInvalid(error.message.to_string()),
-            "BLOB_UPLOAD_UNKNOWN" => ErrorCode::BlobUploadUnknown(error.message.to_string()),
-            "DIGEST_INVALID" => ErrorCode::DigestInvalid(error.message.to_string()),
-            "MANIFEST_BLOB_UNKNOWN" => ErrorCode::ManifestBlobUnknown(error.message.to_string()),
-            "MANIFEST_INVALID" => ErrorCode::ManifestInvalid(error.message.to_string()),
-            "MANIFEST_UNKNOWN" => ErrorCode::ManifestUnknown(error.message.to_string()),
-            "NAME_INVALID" => ErrorCode::NameInvalid(error.message.to_string()),
-            "NAME_UNKNOWN" => ErrorCode::NameUnknown(error.message.to_string()),
-            "SIZE_INVALID" => ErrorCode::SizeInvalid(error.message.to_string()),
-            "UNAUTHORIZED" => ErrorCode::Unauthorized(error.message.to_string()),
-            "DENIED" => ErrorCode::Denied(error.message.to_string()),
-            "UNSUPPORTED" => ErrorCode::Unsupported(error.message.to_string()),
-            _ => ErrorCode::Other(Some(error.message.to_string())),
-        }
     }
 
     fn normalize_media_type(media_type: &str) -> MediaType {
@@ -584,12 +384,9 @@ impl OCIClient {
     fn parse_oci_image_index_v1(v: &Value, field: &str) -> Result<Option<Manifest>, ErrorCode> {
         Self::parse_object(v, field, |v, _field| {
             Ok(Manifest::OciImageIndexV1(OciImageIndexManifestV1 {
-                schema_version: Self::required(
-                    Self::parse_schema_version(
-                        &v["schemaVersion"],
-                        &format!("{field}.schemaVersion"),
-                    ),
-                    "schemaVersion",
+                schema_version: Self::parse_u8(
+                    &v["schemaVersion"],
+                    &format!("{field}.schemaVersion"),
                 )?,
                 media_type: Self::required(
                     Self::parse_media_type(&v["mediaType"], &format!("{field}.mediaType")),
@@ -716,11 +513,8 @@ impl OCIClient {
     fn parse_oci_image_manifest_v1(v: &Value, field: &str) -> Result<Option<Manifest>, ErrorCode> {
         Self::parse_object(v, field, |v, _field| {
             Ok(Manifest::OciImageV1(OciImageManifestV1 {
-                schema_version: Self::required(
-                    Self::parse_schema_version(
-                        &v["schemaVersion"],
-                        &format!("{field}.schemaVersion"),
-                    ),
+                schema_version: Self::parse_u8(
+                    &v["schemaVersion"],
                     &format!("{field}.schemaVersion"),
                 )?,
                 media_type: Self::required(
@@ -1034,16 +828,6 @@ impl OCIClient {
         }
     }
 
-    fn parse_schema_version(v: &Value, field: &str) -> Result<Option<SchemaVersion>, ErrorCode> {
-        match Self::parse_u8(v, field)? {
-            Some(version) => match version {
-                2 => Ok(Some(SchemaVersion::V2)),
-                _ => Ok(Some(SchemaVersion::Other(Some(version as u8)))),
-            },
-            None => Ok(None),
-        }
-    }
-
     fn parse_digest(v: &Value, field: &str) -> Result<Option<Digest>, ErrorCode> {
         match Self::parse_string(v, field)? {
             Some(digest) => Ok(Some(Self::digest(digest)?)),
@@ -1113,12 +897,353 @@ struct TransportError {
     // detail: Option<String>,
 }
 
+/// Requests to the registry, authenticating with a bearer token when the registry challenges
+/// the request and decoding the registry's errors. The content of a response streams, e.g. a blob
+/// or a manifest, verified against its digest. The end of the content is only reported once the
+/// content matches the digest. Every digest the client verifies is verified here.
+///
+/// Exported functions build on this rather than on `get-blob`, a component can't read a future
+/// it writes itself.
+struct Transport {
+    body: StreamReader<u8>,
+    /// the expected digest and the hasher computing the actual digest, taken once verified
+    verification: Option<(Digest, DigestHasher)>,
+    /// the outcome of the verification, returned again by every later read so a mismatch is
+    /// never followed by what looks like the verified end of the content
+    verified: Result<(), ErrorCode>,
+    /// the registry closed the body, the content is verified on the next read
+    ended: bool,
+}
+
+impl Transport {
+    /// Requests content from the registry, verified against the digest when there is one, e.g.
+    /// not for a manifest requested by tag. Errors from the registry are returned before the
+    /// content is read.
+    async fn fetch(
+        url: String,
+        headers: Vec<(String, String)>,
+        digest: Option<Digest>,
+    ) -> Result<Self, ErrorCode> {
+        // an unsupported algorithm fails before the request, the content couldn't be verified
+        let verification = match digest {
+            Some(digest) => {
+                let hasher = DigestHasher::new(&digest.algorithm)?;
+                Some((digest, hasher))
+            }
+            None => None,
+        };
+        let http::HttpResponse {
+            status,
+            headers,
+            body,
+            ..
+        } = Self::get(url, headers).await?;
+        if status != 200 {
+            return Err(Self::decode_transport_error(body, status, headers).await);
+        }
+
+        Ok(Self {
+            body,
+            verification,
+            verified: Ok(()),
+            ended: false,
+        })
+    }
+
+    /// The next chunk of content, `None` once all of the content is read and matches the
+    /// digest, `digest-invalid` when it does not.
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, ErrorCode> {
+        while !self.ended {
+            let (status, chunk) = self.body.read(Vec::with_capacity(BLOB_CHUNK_SIZE)).await;
+            self.ended = status == StreamResult::Dropped;
+            if !chunk.is_empty() {
+                if let Some((_, hasher)) = &mut self.verification {
+                    hasher.update(&chunk);
+                }
+                return Ok(Some(chunk));
+            }
+        }
+        if let Some((digest, hasher)) = self.verification.take() {
+            self.verified = Self::assert_digest(digest, hasher.finalize());
+        }
+        self.verified.clone().map(|()| None)
+    }
+
+    /// All of the content, once it matches the digest.
+    async fn collect(mut self) -> Result<Vec<u8>, ErrorCode> {
+        let mut content = vec![];
+        while let Some(chunk) = self.next().await? {
+            content.extend(chunk);
+        }
+        Ok(content)
+    }
+
+    async fn get(
+        url: String,
+        mut headers: Vec<(String, String)>,
+    ) -> Result<HttpResponse, ErrorCode> {
+        let response = http::get(url.clone(), headers.clone(), None).await?;
+        if response.status != 401 {
+            return Ok(response);
+        }
+
+        let challenge = response
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"))
+            .and_then(|(_, v)| Self::parse_www_authenticate(v));
+        let Some((scheme, params)) = challenge else {
+            return Ok(response);
+        };
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            // other schemes (e.g. basic) require credentials, which are not supported yet
+            return Ok(response);
+        }
+
+        // https://distribution.github.io/distribution/spec/auth/token/
+        let token = Self::fetch_token(&params).await?;
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+
+        // a second 401 is returned to the caller and decoded as a transport error
+        Ok(http::get(url, headers, None).await?)
+    }
+
+    async fn fetch_token(params: &BTreeMap<String, String>) -> Result<String, ErrorCode> {
+        let realm = params.get("realm").ok_or_else(|| {
+            ErrorCode::Unauthorized("bearer challenge is missing realm".to_string())
+        })?;
+        let mut url = Url::parse(realm)
+            .map_err(|e| ErrorCode::Unauthorized(format!("invalid token realm {realm}: {e}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            for key in ["service", "scope"] {
+                if let Some(value) = params.get(key) {
+                    query.append_pair(key, value);
+                }
+            }
+        }
+
+        let http::HttpResponse { status, body, .. } =
+            http::get(url.to_string(), vec![], None).await?;
+        let body = body.collect().await;
+        if status != 200 {
+            return Err(ErrorCode::Unauthorized(format!(
+                "token request to {realm} failed with status {status}"
+            )));
+        }
+
+        let TokenResponse {
+            token,
+            access_token,
+        } = serde_json::from_slice(&body)?;
+        token.or(access_token).ok_or_else(|| {
+            ErrorCode::Unauthorized(format!("token response from {realm} is missing token"))
+        })
+    }
+
+    /// Parses a single `WWW-Authenticate` challenge into its scheme and
+    /// lower-cased auth-params, e.g.
+    /// `Bearer realm="https://auth.example/token",service="example",scope="repository:foo:pull"`
+    fn parse_www_authenticate(value: &str) -> Option<(String, BTreeMap<String, String>)> {
+        let value = value.trim();
+        let (scheme, rest) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
+        if scheme.is_empty() {
+            return None;
+        }
+
+        let mut params = BTreeMap::new();
+        let mut chars = rest.chars().peekable();
+        loop {
+            while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
+            if chars.peek().is_none() {
+                break;
+            }
+
+            let mut key = String::new();
+            while let Some(c) = chars.next_if(|c| *c != '=' && *c != ',') {
+                key.push(c);
+            }
+            if chars.next_if_eq(&'=').is_none() {
+                // token68 or malformed param, not used by registries
+                continue;
+            }
+            while chars.next_if(|c| c.is_whitespace()).is_some() {}
+
+            let mut val = String::new();
+            if chars.next_if_eq(&'"').is_some() {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => val.extend(chars.next()),
+                        '"' => break,
+                        _ => val.push(c),
+                    }
+                }
+            } else {
+                while let Some(c) = chars.next_if(|c| *c != ',') {
+                    val.push(c);
+                }
+            }
+            params.insert(key.trim().to_ascii_lowercase(), val.trim().to_string());
+        }
+
+        Some((scheme.to_string(), params))
+    }
+
+    async fn decode_transport_error(
+        body: StreamReader<u8>,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) -> ErrorCode {
+        if status == 429 {
+            let after = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Retry-After"))
+                .map(|(_, v)| {
+                    if let Ok(seconds) = v.parse::<u32>() {
+                        return Some(RetryAfter::DelaySeconds(seconds));
+                    }
+                    if let Ok(date) = httpdate::parse_http_date(v) {
+                        let seconds = date
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            .try_into()
+                            .unwrap();
+                        if seconds == 0 {
+                            return None;
+                        }
+                        return Some(RetryAfter::Date(Instant {
+                            seconds: seconds,
+                            nanoseconds: 0,
+                        }));
+                    }
+                    None
+                })
+                .flatten();
+            return ErrorCode::Toomanyrequests(after);
+        }
+
+        let body = body.collect().await;
+
+        let transport_errors: serde_json::Result<TransportErrors> = serde_json::from_slice(&body);
+        if transport_errors.is_err() {
+            return ErrorCode::Other(Some(format!(
+                "transport error with http status {status}: {}",
+                transport_errors.unwrap_err()
+            )));
+        }
+        let transport_errors = transport_errors.unwrap();
+        if transport_errors.errors.len() == 0 {
+            return ErrorCode::Other(Some(format!(
+                "transport error with http status {status}: unspecified errors"
+            )));
+        }
+        let error = transport_errors.errors.get(0).unwrap();
+
+        match error.code.as_str() {
+            "BLOB_UNKNOWN" => ErrorCode::BlobUnknown(error.message.to_string()),
+            "BLOB_UPLOAD_INVALID" => ErrorCode::BlobUploadInvalid(error.message.to_string()),
+            "BLOB_UPLOAD_UNKNOWN" => ErrorCode::BlobUploadUnknown(error.message.to_string()),
+            "DIGEST_INVALID" => ErrorCode::DigestInvalid(error.message.to_string()),
+            "MANIFEST_BLOB_UNKNOWN" => ErrorCode::ManifestBlobUnknown(error.message.to_string()),
+            "MANIFEST_INVALID" => ErrorCode::ManifestInvalid(error.message.to_string()),
+            "MANIFEST_UNKNOWN" => ErrorCode::ManifestUnknown(error.message.to_string()),
+            "NAME_INVALID" => ErrorCode::NameInvalid(error.message.to_string()),
+            "NAME_UNKNOWN" => ErrorCode::NameUnknown(error.message.to_string()),
+            "SIZE_INVALID" => ErrorCode::SizeInvalid(error.message.to_string()),
+            "UNAUTHORIZED" => ErrorCode::Unauthorized(error.message.to_string()),
+            "DENIED" => ErrorCode::Denied(error.message.to_string()),
+            "UNSUPPORTED" => ErrorCode::Unsupported(error.message.to_string()),
+            _ => ErrorCode::Other(Some(error.message.to_string())),
+        }
+    }
+
+    fn assert_digest(expected_digest: Digest, actual_digest: Digest) -> Result<(), ErrorCode> {
+        if expected_digest != actual_digest {
+            Err(ErrorCode::DigestInvalid(format!(
+                "digest mismatch: expected = {expected_digest}, actual = {actual_digest}",
+            )))?
+        }
+        Ok(())
+    }
+}
+
+/// Computes a digest incrementally, e.g. as content streams from the registry
+enum DigestHasher {
+    Sha256(sha2::Sha256),
+    Sha512(sha2::Sha512),
+}
+
+impl DigestHasher {
+    fn new(algorithm: &DigestAlgorithm) -> Result<Self, ErrorCode> {
+        match algorithm {
+            DigestAlgorithm::Sha256 => Ok(Self::Sha256(sha2::Sha256::new())),
+            DigestAlgorithm::Sha512 => Ok(Self::Sha512(sha2::Sha512::new())),
+            _ => Err(ErrorCode::DigestInvalid(format!(
+                "unsupported algorithm: {}",
+                algorithm
+            ))),
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Sha256(hasher) => hasher.update(bytes),
+            Self::Sha512(hasher) => hasher.update(bytes),
+        }
+    }
+
+    fn finalize(self) -> Digest {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        match self {
+            Self::Sha256(hasher) => Digest {
+                algorithm: DigestAlgorithm::Sha256,
+                encoded: hex(&hasher.finalize()),
+            },
+            Self::Sha512(hasher) => Digest {
+                algorithm: DigestAlgorithm::Sha512,
+                encoded: hex(&hasher.finalize()),
+            },
+        }
+    }
+}
+
+/// Whether every byte of the value is allowed and its length is within the range, the same as an
+/// anchored regex of a single ASCII character class, e.g. `^[a-f0-9]{64}$`. A non-ASCII
+/// character is never allowed, so the length in bytes is the length in characters.
+fn is_ascii_class(value: &str, len: RangeInclusive<usize>, allowed: impl Fn(u8) -> bool) -> bool {
+    len.contains(&value.len()) && value.bytes().all(allowed)
+}
+
+/// A tag, `^[a-zA-Z0-9_\-.]{1,128}$`
+fn is_tag(value: &str) -> bool {
+    is_ascii_class(value, 1..=128, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')
+    })
+}
+
+/// The encoded value of a digest, `^[a-f0-9]{len}$`
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    is_ascii_class(value, len..=len, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The characters of a repository, `^[a-z0-9_\-./]{1,255}$`
+fn is_repository(value: &str) -> bool {
+    is_ascii_class(value, 1..=255, |b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.' | b'/')
+    })
+}
+
 impl From<http::ErrorCode> for ErrorCode {
     fn from(value: http::ErrorCode) -> Self {
         match value {
-            http::ErrorCode::RedirectLimitExceeded((_, count)) => Self::Other(Some(format!(
-                "too many redirects, stopped after {count}"
-            ))),
+            http::ErrorCode::RedirectLimitExceeded((_, count)) => {
+                Self::Other(Some(format!("too many redirects, stopped after {count}")))
+            }
             http::ErrorCode::RedirectRequiresBody(_) => Self::Other(Some(
                 "redirect requires resending the request body".to_string(),
             )),
@@ -1146,6 +1271,16 @@ impl Display for Digest {
     }
 }
 
+impl Display for DigestAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sha256 => f.write_str("sha256"),
+            Self::Sha512 => f.write_str("sha512"),
+            Self::Other(algorithm) => f.write_str(algorithm),
+        }
+    }
+}
+
 impl PartialEq for Reference {
     fn eq(&self, other: &Self) -> bool {
         self.registry == other.registry
@@ -1158,6 +1293,17 @@ impl PartialEq for Reference {
 impl PartialEq for Digest {
     fn eq(&self, other: &Self) -> bool {
         self.algorithm == other.algorithm && self.encoded == other.encoded
+    }
+}
+
+impl PartialEq for DigestAlgorithm {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DigestAlgorithm::Sha256, DigestAlgorithm::Sha256) => true,
+            (DigestAlgorithm::Sha512, DigestAlgorithm::Sha512) => true,
+            (DigestAlgorithm::Other(this), DigestAlgorithm::Other(that)) => this == that,
+            _ => false,
+        }
     }
 }
 
@@ -1259,16 +1405,6 @@ impl PartialEq for MediaTypeSuffix {
             (MediaTypeSuffix::Gzip, MediaTypeSuffix::Gzip) => true,
             (MediaTypeSuffix::Zstd, MediaTypeSuffix::Zstd) => true,
             (MediaTypeSuffix::Other(this), MediaTypeSuffix::Other(other)) => this == other,
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq for SchemaVersion {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (SchemaVersion::V2, SchemaVersion::V2) => true,
-            (SchemaVersion::Other(this), SchemaVersion::Other(other)) => this == other,
             _ => false,
         }
     }
@@ -1452,9 +1588,17 @@ mod tests {
         Some(tag.to_string())
     }
 
-    fn make_digest(algorithm: &str, encoded: &str) -> Option<Digest> {
+    fn make_digest_sha256(encoded: &str) -> Option<Digest> {
+        make_digest(DigestAlgorithm::Sha256, encoded)
+    }
+
+    fn make_digest_sha512(encoded: &str) -> Option<Digest> {
+        make_digest(DigestAlgorithm::Sha512, encoded)
+    }
+
+    fn make_digest(algorithm: DigestAlgorithm, encoded: &str) -> Option<Digest> {
         Some(Digest {
-            algorithm: algorithm.to_string(),
+            algorithm,
             encoded: encoded.to_string(),
         })
     }
@@ -1463,6 +1607,53 @@ mod tests {
         Err(ErrorCode::Other(Some(format!(
             "could not parse reference: {reference}"
         ))))
+    }
+
+    #[test]
+    fn test_ascii_classes_match_regex() {
+        use regex::Regex;
+
+        let checks: [(&str, fn(&str) -> bool); 4] = [
+            (r"^[a-zA-Z0-9_\-.]{1,128}$", is_tag),
+            (r"^[a-f0-9]{64}$", |v| is_lower_hex(v, 64)),
+            (r"^[a-f0-9]{128}$", |v| is_lower_hex(v, 128)),
+            (r"^[a-z0-9_\-./]{1,255}$", is_repository),
+        ];
+
+        // every character class boundary, and characters a regex could treat differently
+        let alphabet: Vec<char> = "09afgzAFGZ_-./:@ \n\t\0\x7féÅ☃🦀ａ０".chars().collect();
+        let mut inputs: Vec<String> = vec![String::new()];
+        for len in [1, 2, 63, 64, 65, 127, 128, 129, 254, 255, 256] {
+            for c in &alphabet {
+                inputs.push(c.to_string().repeat(len));
+                // a valid prefix and a single other character at the end, e.g. a trailing newline
+                inputs.push(format!("{}{c}", "a".repeat(len - 1)));
+                inputs.push(format!("{c}{}", "a".repeat(len - 1)));
+            }
+        }
+        // deterministic pseudo-random mixes of the alphabet
+        let mut state: u64 = 0x2545f4914f6cdd1d;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = (state % 300) as usize;
+            let input = (0..len)
+                .map(|i| alphabet[((state >> (i % 48)) as usize + i) % alphabet.len()])
+                .collect();
+            inputs.push(input);
+        }
+
+        for (pattern, check) in checks {
+            let re = Regex::new(pattern).unwrap();
+            for input in &inputs {
+                assert_eq!(
+                    check(input),
+                    re.is_match(input),
+                    "{pattern} disagrees for {input:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1608,7 +1799,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     None,
-                    make_digest("sha256", sha256),
+                    make_digest_sha256(sha256),
                 ),
                 description: "valid sha256 digest",
             },
@@ -1618,7 +1809,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     None,
-                    make_digest("sha512", sha512),
+                    make_digest_sha512(sha512),
                 ),
                 description: "valid sha512 digest",
             },
@@ -1628,7 +1819,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     make_tag("v1"),
-                    make_digest("sha256", sha256),
+                    make_digest_sha256(sha256),
                 ),
                 description: "valid tag and digest",
             },
@@ -1667,7 +1858,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     make_tag("v1"),
-                    make_digest("sha256", sha256),
+                    make_digest_sha256(sha256),
                 ),
                 description: "when both a tag and a digest are present, the digest wins and the tag is dropped",
             },
@@ -1693,7 +1884,7 @@ mod tests {
         };
 
         assert_eq!(
-            OCIClient::parse_www_authenticate(
+            Transport::parse_www_authenticate(
                 r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull,push""#
             ),
             Some((
@@ -1706,7 +1897,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            OCIClient::parse_www_authenticate(
+            Transport::parse_www_authenticate(
                 r#"Basic Realm = "a \"quoted\" realm" , charset=UTF-8"#
             ),
             Some((
@@ -1715,10 +1906,10 @@ mod tests {
             )),
         );
         assert_eq!(
-            OCIClient::parse_www_authenticate("Bearer"),
+            Transport::parse_www_authenticate("Bearer"),
             Some(("Bearer".to_string(), params(&[]))),
         );
-        assert_eq!(OCIClient::parse_www_authenticate("  "), None);
+        assert_eq!(Transport::parse_www_authenticate("  "), None);
     }
 
     #[test]
@@ -1763,7 +1954,7 @@ mod tests {
                 artifact_type: None,
                 config: OciDescriptorV1 {
                     annotations: None,
-                    digest: Digest { algorithm: "sha256".to_string(), encoded: "80d83bbdaa82cff96584c99217c29fd17bc7e5f0424c0cb26aa3831ea18132b4".to_string() },
+                    digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "80d83bbdaa82cff96584c99217c29fd17bc7e5f0424c0cb26aa3831ea18132b4".to_string() },
                     media_type: MediaType::ApplicationVndWasmConfigV0(MediaTypeSuffix::Json),
                     size: 345,
                     urls: None,
@@ -1774,7 +1965,7 @@ mod tests {
                     annotations: Some(BTreeMap::from([
                         ("org.opencontainers.image.title".to_string(), "client.wasm".to_string()),
                     ])),
-                    digest: Digest { algorithm: "sha256".to_string(), encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db".to_string() },
+                    digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db".to_string() },
                     media_type: MediaType::ApplicationWasm,
                     size: 1894585,
                     urls: None,
@@ -1782,7 +1973,7 @@ mod tests {
                     data: None,
                  }],
                 media_type: MediaType::ApplicationVndOciImageManifestV1(MediaTypeSuffix::Json),
-                schema_version: SchemaVersion::V2,
+                schema_version: Some(2 as u8),
                 subject: None,
             })),
         );
@@ -1815,7 +2006,7 @@ mod tests {
                 ]
             }), "").unwrap(),
             Some(Manifest::OciImageIndexV1(OciImageIndexManifestV1 {
-                schema_version: SchemaVersion::V2,
+                schema_version: Some(2 as u8),
                 media_type: MediaType::ApplicationVndOciImageIndexV1(MediaTypeSuffix::Json),
                 artifact_type: None,
                 manifests: vec![
@@ -1831,7 +2022,7 @@ mod tests {
                             variant:None,
                         }),
                         subject:None,
-                        digest: Digest { algorithm: "sha256".to_string(), encoded: "9434033b4008b51c0c9270dda9315ea4229901fee28a7980085091e9fd4b62b8".to_string() },
+                        digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "9434033b4008b51c0c9270dda9315ea4229901fee28a7980085091e9fd4b62b8".to_string() },
                         urls: None,
                         data: None,
                         artifact_type: Some(MediaType::Other("application/vnd.docker.container.image.v1+json".to_string()))
@@ -1846,7 +2037,7 @@ mod tests {
                             os_features:None,os_version:None,variant:None,
                         }),
                         subject:None,
-                        digest: Digest { algorithm: "sha256".to_string(), encoded: "eac7a2bcae76b2bc5b5fed23033ffba56283462e315c2035b6ab5b2c8c80bd34".to_string() },
+                        digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "eac7a2bcae76b2bc5b5fed23033ffba56283462e315c2035b6ab5b2c8c80bd34".to_string() },
                         urls: None,
                         data: None,
                         artifact_type: Some(MediaType::Other("application/vnd.docker.container.image.v1+json".to_string())),
@@ -1948,9 +2139,9 @@ mod tests {
                 rootfs: OciImageConfigV1ContentAddresses {
                     type_: "layers".to_string(),
                     diff_ids: vec![
-                        Digest{algorithm:"sha256".to_string(), encoded:"458136df58646e7146e8240b685e4e6bfffa019ba10d3c221ff59b3928f54d8c".to_string()},
-                        Digest{algorithm:"sha256".to_string(), encoded:"ffe56a1c5f3878e9b5f803842adb9e2ce81584b6bd027e8599582aefe14a975b".to_string()},
-                        Digest{algorithm:"sha256".to_string(), encoded:"38217aaa0c148dcb7f3af90a384d30ccb4a7736a9f15b75a5d6a9f28c586964b".to_string()},
+                        Digest{algorithm:DigestAlgorithm::Sha256, encoded:"458136df58646e7146e8240b685e4e6bfffa019ba10d3c221ff59b3928f54d8c".to_string()},
+                        Digest{algorithm:DigestAlgorithm::Sha256, encoded:"ffe56a1c5f3878e9b5f803842adb9e2ce81584b6bd027e8599582aefe14a975b".to_string()},
+                        Digest{algorithm:DigestAlgorithm::Sha256, encoded:"38217aaa0c148dcb7f3af90a384d30ccb4a7736a9f15b75a5d6a9f28c586964b".to_string()},
                     ]
                 },
                 config: Some(OciImageConfigV1Config{
@@ -2015,7 +2206,7 @@ mod tests {
                 architecture: "wasm".to_string(),
                 os: "wasip2".to_string(),
                 layer_digests: vec![Digest {
-                    algorithm: "sha256".to_string(),
+                    algorithm: DigestAlgorithm::Sha256,
                     encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db"
                         .to_string()
                 }],
