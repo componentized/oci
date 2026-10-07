@@ -348,23 +348,36 @@ interface client {
         other(string),
     }
 
-    /// Parse a string image reference like `ubuntu` or `ghcr.io/componentized/oci:1.0.0` for use by the other methods.
+    /// Parse a string image reference like `ubuntu` or
+    /// `ghcr.io/componentized/oci:1.0.0` for use by the other methods.
     @since(version = 0.1.0-dev)
     parse-reference: func(reference: string) -> result<reference, error-code>;
 
-    /// Resolves a tagged reference to a digest with the registry. Digested references are returned immediately.
+    /// Resolves a tagged reference to a digest with the registry. Digested
+    /// references are returned immediately.
     @since(version = 0.1.0-dev)
     resolve-digest: async func(reference: reference) -> result<digest, error-code>;
 
-    /// Gets a blob from the registry. The reference must be digested. Manifests must be fetched with `get-manifest()`
+    /// Gets a blob from the registry. The reference must be digested.
+    /// Manifests must be fetched with `get-manifest()`.
+    ///
+    /// The content streams as it's received from the registry. Errors from the
+    /// registry are returned before the content starts. The content is
+    /// verified against the digest as it streams, the future resolves once the
+    /// stream ends, with `digest-invalid` when the content does not match the
+    /// digest. Content read from the stream must not be trusted until the
+    /// future resolves successfully.
     @since(version = 0.1.0-dev)
-    get-blob: async func(reference: reference) -> result<list<u8>, error-code>;
+    get-blob: async func(reference: reference) -> result<tuple<stream<u8>, future<result<_, error-code>>>, error-code>;
 
-    /// Gets a config from the registry decoding by media type. In many cases, the media type cannot be inferred and must be passed explicitly. The reference must be digested.
+    /// Gets a config from the registry decoding by media type. In many cases,
+    /// the media type cannot be inferred and must be passed explicitly. The
+    /// reference must be digested.
     @since(version = 0.1.0-dev)
     get-config: async func(reference: reference, default-media-type: option<media-type>) -> result<config, error-code>;
 
-    /// Gets a manifest from the registry decoding by media type. The reference may be tagged or digested.
+    /// Gets a manifest from the registry decoding by media type. The reference
+    /// may be tagged or digested.
     @since(version = 0.1.0-dev)
     get-manifest: async func(reference: reference) -> result<manifest, error-code>;
 

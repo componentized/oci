@@ -5,8 +5,9 @@ use std::{collections::BTreeMap, fmt::Display, time::UNIX_EPOCH};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::Digest as _;
 use url::Url;
-use wit_bindgen::StreamReader;
+use wit_bindgen::{FutureReader, StreamReader, StreamResult};
 
 use crate::{
     componentized::http::client::{self as http, HttpResponse},
@@ -21,6 +22,14 @@ use crate::{
 };
 
 pub(crate) struct OCIClient;
+
+/// the size of each read from the registry while streaming a blob
+const BLOB_CHUNK_SIZE: usize = 64 * 1024;
+
+/// the manifest media types the client accepts, a registry may serve a different manifest for a
+/// tag depending on the media types accepted
+const MANIFEST_ACCEPT: &str =
+    "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json";
 
 impl Guest for OCIClient {
     #[allow(async_fn_in_trait)]
@@ -41,60 +50,58 @@ impl Guest for OCIClient {
 
     #[allow(async_fn_in_trait)]
     async fn resolve_digest(reference: Reference) -> Result<Digest, ErrorCode> {
-        let Reference {
-            registry,
-            repository,
-            tag,
-            digest,
-        } = reference;
-
+        let (url, digest) = Self::manifest_url(reference);
         if let Some(digest) = digest {
             return Ok(digest);
         }
+        let headers = vec![("Accept".to_string(), MANIFEST_ACCEPT.to_string())];
 
-        let tag = tag.unwrap_or("latest".to_string());
-        let url = format!("https://{registry}/v2/{repository}/manifests/{tag}");
-        let http::HttpResponse {
-            status,
-            headers,
-            body,
-            ..
-        } = Self::get(url, vec![]).await?;
+        // the same manifest `get-manifest` gets for the tag
+        let bytes = Transport::fetch(url, headers, None)
+            .await?
+            .collect()
+            .await?;
 
-        match status {
-            200 => Self::compute_digest(&DigestAlgorithm::Sha256, &body.collect().await),
-            _ => Err(Self::decode_transport_error(body, status, headers).await),
-        }
+        let mut hasher = DigestHasher::new(&DigestAlgorithm::Sha256)?;
+        hasher.update(&bytes);
+        Ok(hasher.finalize())
     }
 
     #[allow(async_fn_in_trait)]
-    async fn get_blob(reference: Reference) -> Result<Vec<u8>, ErrorCode> {
-        let Reference {
-            registry,
-            repository,
-            tag: _,
-            digest,
-        } = reference;
-        let digest = match digest {
-            Some(digest) => digest,
-            None => Err(ErrorCode::BlobUnknown("digest required".to_string()))?,
-        };
-        let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
-        let http::HttpResponse {
-            status,
-            headers,
-            body,
-            ..
-        } = Self::get(url, vec![]).await?;
+    async fn get_blob(
+        reference: Reference,
+    ) -> Result<(StreamReader<u8>, FutureReader<Result<(), ErrorCode>>), ErrorCode> {
+        let (url, digest) = Self::blob_url(reference)?;
+        let mut blob = Transport::fetch(url, vec![], Some(digest)).await?;
 
-        let raw = match status {
-            200 => Ok(body.collect().await),
-            _ => Err(Self::decode_transport_error(body, status, headers).await),
-        }?;
+        let (mut content_tx, content_rx) = wit_stream::new();
+        // written when the task ends without verifying the content, e.g. the caller dropped the
+        // stream before reading all of the content
+        let (verified_tx, verified_rx) = wit_future::new(|| {
+            Err(ErrorCode::DigestInvalid(
+                "blob content was not verified, the stream ended early".to_string(),
+            ))
+        });
+        wit_bindgen::spawn_local(async move {
+            let verified = loop {
+                match blob.next().await {
+                    Ok(Some(chunk)) => {
+                        if !content_tx.write_all(chunk).await.is_empty() {
+                            // the caller dropped the stream
+                            return;
+                        }
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(err) => break Err(err),
+                }
+            };
+            // the stream ends before the future resolves, a caller reads to the end of the
+            // stream and then awaits the future
+            drop(content_tx);
+            verified_tx.write(verified).await.ok();
+        });
 
-        Self::assert_digest(digest, &raw)?;
-
-        Ok(raw)
+        Ok((content_rx, verified_rx))
     }
 
     #[allow(async_fn_in_trait)]
@@ -102,7 +109,12 @@ impl Guest for OCIClient {
         reference: Reference,
         default_media_type: Option<MediaType>,
     ) -> Result<Config, ErrorCode> {
-        let blob = Self::get_blob(reference).await?;
+        // configs are small, buffered to decode
+        let (url, digest) = Self::blob_url(reference)?;
+        let blob = Transport::fetch(url, vec![], Some(digest))
+            .await?
+            .collect()
+            .await?;
 
         Self::required(
             Self::parse_config(
@@ -116,37 +128,13 @@ impl Guest for OCIClient {
 
     #[allow(async_fn_in_trait)]
     async fn get_manifest(reference: Reference) -> Result<Manifest, ErrorCode> {
-        let Reference {
-            registry,
-            repository,
-            tag,
-            digest,
-        } = reference;
-        let version = match digest.clone() {
-            Some(digest) => digest.to_string(),
-            None => match tag {
-                Some(tag) => tag,
-                None => "latest".to_string(),
-            },
-        };
-        let url = format!("https://{registry}/v2/{repository}/manifests/{version}");
-        let http::HttpResponse {
-            status,
-            headers,
-            body,
-            ..
-        } = Self::get(url, vec![
-            ("Accept".to_string(), "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json".to_string())
-        ]).await?;
-
-        let raw = match status {
-            200 => body.collect().await,
-            _ => Err(Self::decode_transport_error(body, status, headers).await)?,
-        };
-        if let Some(digest) = digest {
-            // check if manifest was requested by digest, ignore if requested by tag
-            Self::assert_digest(digest, &raw)?
-        }
+        let (url, digest) = Self::manifest_url(reference);
+        let headers = vec![("Accept".to_string(), MANIFEST_ACCEPT.to_string())];
+        // a manifest requested by tag has no digest to verify
+        let raw = Transport::fetch(url, headers, digest)
+            .await?
+            .collect()
+            .await?;
         Self::required(
             Self::parse_manifest(&serde_json::from_slice(&raw)?, "$manifest"),
             "$manifest",
@@ -155,116 +143,37 @@ impl Guest for OCIClient {
 }
 
 impl OCIClient {
-    async fn get(
-        url: String,
-        mut headers: Vec<(String, String)>,
-    ) -> Result<HttpResponse, ErrorCode> {
-        let response = http::get(url.clone(), headers.clone(), None).await?;
-        if response.status != 401 {
-            return Ok(response);
-        }
-
-        let challenge = response
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"))
-            .and_then(|(_, v)| Self::parse_www_authenticate(v));
-        let Some((scheme, params)) = challenge else {
-            return Ok(response);
+    /// The url of a blob in the registry, and its digest. The reference must be digested.
+    fn blob_url(reference: Reference) -> Result<(String, Digest), ErrorCode> {
+        let Reference {
+            registry,
+            repository,
+            tag: _,
+            digest,
+        } = reference;
+        let digest = match digest {
+            Some(digest) => digest,
+            None => Err(ErrorCode::BlobUnknown("digest required".to_string()))?,
         };
-        if !scheme.eq_ignore_ascii_case("bearer") {
-            // other schemes (e.g. basic) require credentials, which are not supported yet
-            return Ok(response);
-        }
-
-        // https://distribution.github.io/distribution/spec/auth/token/
-        let token = Self::fetch_token(&params).await?;
-        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
-        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-
-        // a second 401 is returned to the caller and decoded as a transport error
-        Ok(http::get(url, headers, None).await?)
+        let url = format!("https://{registry}/v2/{repository}/blobs/{digest}");
+        Ok((url, digest))
     }
 
-    async fn fetch_token(params: &BTreeMap<String, String>) -> Result<String, ErrorCode> {
-        let realm = params.get("realm").ok_or_else(|| {
-            ErrorCode::Unauthorized("bearer challenge is missing realm".to_string())
-        })?;
-        let mut url = Url::parse(realm)
-            .map_err(|e| ErrorCode::Unauthorized(format!("invalid token realm {realm}: {e}")))?;
-        {
-            let mut query = url.query_pairs_mut();
-            for key in ["service", "scope"] {
-                if let Some(value) = params.get(key) {
-                    query.append_pair(key, value);
-                }
-            }
-        }
-
-        let http::HttpResponse { status, body, .. } =
-            http::get(url.to_string(), vec![], None).await?;
-        let body = body.collect().await;
-        if status != 200 {
-            return Err(ErrorCode::Unauthorized(format!(
-                "token request to {realm} failed with status {status}"
-            )));
-        }
-
-        let TokenResponse {
-            token,
-            access_token,
-        } = serde_json::from_slice(&body)?;
-        token.or(access_token).ok_or_else(|| {
-            ErrorCode::Unauthorized(format!("token response from {realm} is missing token"))
-        })
-    }
-
-    /// Parses a single `WWW-Authenticate` challenge into its scheme and
-    /// lower-cased auth-params, e.g.
-    /// `Bearer realm="https://auth.example/token",service="example",scope="repository:foo:pull"`
-    fn parse_www_authenticate(value: &str) -> Option<(String, BTreeMap<String, String>)> {
-        let value = value.trim();
-        let (scheme, rest) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
-        if scheme.is_empty() {
-            return None;
-        }
-
-        let mut params = BTreeMap::new();
-        let mut chars = rest.chars().peekable();
-        loop {
-            while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
-            if chars.peek().is_none() {
-                break;
-            }
-
-            let mut key = String::new();
-            while let Some(c) = chars.next_if(|c| *c != '=' && *c != ',') {
-                key.push(c);
-            }
-            if chars.next_if_eq(&'=').is_none() {
-                // token68 or malformed param, not used by registries
-                continue;
-            }
-            while chars.next_if(|c| c.is_whitespace()).is_some() {}
-
-            let mut val = String::new();
-            if chars.next_if_eq(&'"').is_some() {
-                while let Some(c) = chars.next() {
-                    match c {
-                        '\\' => val.extend(chars.next()),
-                        '"' => break,
-                        _ => val.push(c),
-                    }
-                }
-            } else {
-                while let Some(c) = chars.next_if(|c| *c != ',') {
-                    val.push(c);
-                }
-            }
-            params.insert(key.trim().to_ascii_lowercase(), val.trim().to_string());
-        }
-
-        Some((scheme.to_string(), params))
+    /// The url of a manifest in the registry.
+    fn manifest_url(reference: Reference) -> (String, Option<Digest>) {
+        let Reference {
+            registry,
+            repository,
+            tag,
+            digest,
+        } = reference;
+        let version = match (digest.clone(), tag) {
+            (Some(digest), _) => digest.to_string(),
+            (None, Some(tag)) => tag,
+            (None, None) => "latest".to_string(),
+        };
+        let url = format!("https://{registry}/v2/{repository}/manifests/{version}");
+        (url, digest)
     }
 
     fn tag_reference(reference: String) -> Result<Reference, ErrorCode> {
@@ -352,43 +261,6 @@ impl OCIClient {
         }
     }
 
-    fn compute_digest(algorithm: &DigestAlgorithm, bytes: &[u8]) -> Result<Digest, ErrorCode> {
-        fn hash_hex<D: sha2::Digest>(bytes: &[u8]) -> String {
-            let mut hasher = D::new();
-            hasher.update(bytes);
-            hasher
-                .finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
-        }
-
-        match algorithm {
-            DigestAlgorithm::Sha256 => Ok(Digest {
-                algorithm: algorithm.clone(),
-                encoded: hash_hex::<sha2::Sha256>(bytes),
-            }),
-            DigestAlgorithm::Sha512 => Ok(Digest {
-                algorithm: algorithm.clone(),
-                encoded: hash_hex::<sha2::Sha512>(bytes),
-            }),
-            _ => Err(ErrorCode::DigestInvalid(format!(
-                "unsupported algorithm: {}",
-                algorithm
-            ))),
-        }
-    }
-
-    fn assert_digest(expected_digest: Digest, bytes: &[u8]) -> Result<(), ErrorCode> {
-        let actual_digest = Self::compute_digest(&expected_digest.algorithm, bytes)?;
-        if expected_digest != actual_digest {
-            Err(ErrorCode::DigestInvalid(format!(
-                "digest mismatch: expected = {expected_digest}, actual = {actual_digest}",
-            )))?
-        }
-        Ok(())
-    }
-
     fn parse_repository_reference(reference: String) -> Result<Reference, ErrorCode> {
         if reference.len() == 0 {
             return Err(ErrorCode::Other(Some(
@@ -452,75 +324,6 @@ impl OCIClient {
             tag: None,
             digest: None,
         })
-    }
-
-    async fn decode_transport_error(
-        body: StreamReader<u8>,
-        status: u16,
-        headers: Vec<(String, String)>,
-    ) -> ErrorCode {
-        if status == 429 {
-            let after = headers
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case("Retry-After"))
-                .map(|(_, v)| {
-                    if let Ok(seconds) = v.parse::<u32>() {
-                        return Some(RetryAfter::DelaySeconds(seconds));
-                    }
-                    if let Ok(date) = httpdate::parse_http_date(v) {
-                        let seconds = date
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                            .try_into()
-                            .unwrap();
-                        if seconds == 0 {
-                            return None;
-                        }
-                        return Some(RetryAfter::Date(Instant {
-                            seconds: seconds,
-                            nanoseconds: 0,
-                        }));
-                    }
-                    None
-                })
-                .flatten();
-            return ErrorCode::Toomanyrequests(after);
-        }
-
-        let body = body.collect().await;
-
-        let transport_errors: serde_json::Result<TransportErrors> = serde_json::from_slice(&body);
-        if transport_errors.is_err() {
-            return ErrorCode::Other(Some(format!(
-                "transport error with http status {status}: {}",
-                transport_errors.unwrap_err()
-            )));
-        }
-        let transport_errors = transport_errors.unwrap();
-        if transport_errors.errors.len() == 0 {
-            return ErrorCode::Other(Some(
-                "transport error with http status {status}: unspecified errors".to_string(),
-            ));
-        }
-        let error = transport_errors.errors.get(0).unwrap();
-
-        match error.code.as_str() {
-            "BLOB_UNKNOWN" => ErrorCode::BlobUnknown(error.message.to_string()),
-            "BLOB_UPLOAD_INVALID" => ErrorCode::BlobUploadInvalid(error.message.to_string()),
-            "BLOB_UPLOAD_UNKNOWN" => ErrorCode::BlobUploadUnknown(error.message.to_string()),
-            "DIGEST_INVALID" => ErrorCode::DigestInvalid(error.message.to_string()),
-            "MANIFEST_BLOB_UNKNOWN" => ErrorCode::ManifestBlobUnknown(error.message.to_string()),
-            "MANIFEST_INVALID" => ErrorCode::ManifestInvalid(error.message.to_string()),
-            "MANIFEST_UNKNOWN" => ErrorCode::ManifestUnknown(error.message.to_string()),
-            "NAME_INVALID" => ErrorCode::NameInvalid(error.message.to_string()),
-            "NAME_UNKNOWN" => ErrorCode::NameUnknown(error.message.to_string()),
-            "SIZE_INVALID" => ErrorCode::SizeInvalid(error.message.to_string()),
-            "UNAUTHORIZED" => ErrorCode::Unauthorized(error.message.to_string()),
-            "DENIED" => ErrorCode::Denied(error.message.to_string()),
-            "UNSUPPORTED" => ErrorCode::Unsupported(error.message.to_string()),
-            _ => ErrorCode::Other(Some(error.message.to_string())),
-        }
     }
 
     fn normalize_media_type(media_type: &str) -> MediaType {
@@ -1101,6 +904,321 @@ struct TransportError {
     code: String,
     message: String,
     // detail: Option<String>,
+}
+
+/// Requests to the registry, authenticating with a bearer token when the registry challenges
+/// the request and decoding the registry's errors. The content of a response streams, e.g. a blob
+/// or a manifest, verified against its digest. The end of the content is only reported once the
+/// content matches the digest. Every digest the client verifies is verified here.
+///
+/// Exported functions build on this rather than on `get-blob`, a component can't read a future
+/// it writes itself.
+struct Transport {
+    body: StreamReader<u8>,
+    /// the expected digest and the hasher computing the actual digest, taken once verified
+    verification: Option<(Digest, DigestHasher)>,
+    /// the outcome of the verification, returned again by every later read so a mismatch is
+    /// never followed by what looks like the verified end of the content
+    verified: Result<(), ErrorCode>,
+    /// the registry closed the body, the content is verified on the next read
+    ended: bool,
+}
+
+impl Transport {
+    /// Requests content from the registry, verified against the digest when there is one, e.g.
+    /// not for a manifest requested by tag. Errors from the registry are returned before the
+    /// content is read.
+    async fn fetch(
+        url: String,
+        headers: Vec<(String, String)>,
+        digest: Option<Digest>,
+    ) -> Result<Self, ErrorCode> {
+        // an unsupported algorithm fails before the request, the content couldn't be verified
+        let verification = match digest {
+            Some(digest) => {
+                let hasher = DigestHasher::new(&digest.algorithm)?;
+                Some((digest, hasher))
+            }
+            None => None,
+        };
+        let http::HttpResponse {
+            status,
+            headers,
+            body,
+            ..
+        } = Self::get(url, headers).await?;
+        if status != 200 {
+            return Err(Self::decode_transport_error(body, status, headers).await);
+        }
+
+        Ok(Self {
+            body,
+            verification,
+            verified: Ok(()),
+            ended: false,
+        })
+    }
+
+    /// The next chunk of content, `None` once all of the content is read and matches the
+    /// digest, `digest-invalid` when it does not.
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, ErrorCode> {
+        while !self.ended {
+            let (status, chunk) = self.body.read(Vec::with_capacity(BLOB_CHUNK_SIZE)).await;
+            self.ended = status == StreamResult::Dropped;
+            if !chunk.is_empty() {
+                if let Some((_, hasher)) = &mut self.verification {
+                    hasher.update(&chunk);
+                }
+                return Ok(Some(chunk));
+            }
+        }
+        if let Some((digest, hasher)) = self.verification.take() {
+            self.verified = Self::assert_digest(digest, hasher.finalize());
+        }
+        self.verified.clone().map(|()| None)
+    }
+
+    /// All of the content, once it matches the digest.
+    async fn collect(mut self) -> Result<Vec<u8>, ErrorCode> {
+        let mut content = vec![];
+        while let Some(chunk) = self.next().await? {
+            content.extend(chunk);
+        }
+        Ok(content)
+    }
+
+    async fn get(
+        url: String,
+        mut headers: Vec<(String, String)>,
+    ) -> Result<HttpResponse, ErrorCode> {
+        let response = http::get(url.clone(), headers.clone(), None).await?;
+        if response.status != 401 {
+            return Ok(response);
+        }
+
+        let challenge = response
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("www-authenticate"))
+            .and_then(|(_, v)| Self::parse_www_authenticate(v));
+        let Some((scheme, params)) = challenge else {
+            return Ok(response);
+        };
+        if !scheme.eq_ignore_ascii_case("bearer") {
+            // other schemes (e.g. basic) require credentials, which are not supported yet
+            return Ok(response);
+        }
+
+        // https://distribution.github.io/distribution/spec/auth/token/
+        let token = Self::fetch_token(&params).await?;
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+        headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+
+        // a second 401 is returned to the caller and decoded as a transport error
+        Ok(http::get(url, headers, None).await?)
+    }
+
+    async fn fetch_token(params: &BTreeMap<String, String>) -> Result<String, ErrorCode> {
+        let realm = params.get("realm").ok_or_else(|| {
+            ErrorCode::Unauthorized("bearer challenge is missing realm".to_string())
+        })?;
+        let mut url = Url::parse(realm)
+            .map_err(|e| ErrorCode::Unauthorized(format!("invalid token realm {realm}: {e}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            for key in ["service", "scope"] {
+                if let Some(value) = params.get(key) {
+                    query.append_pair(key, value);
+                }
+            }
+        }
+
+        let http::HttpResponse { status, body, .. } =
+            http::get(url.to_string(), vec![], None).await?;
+        let body = body.collect().await;
+        if status != 200 {
+            return Err(ErrorCode::Unauthorized(format!(
+                "token request to {realm} failed with status {status}"
+            )));
+        }
+
+        let TokenResponse {
+            token,
+            access_token,
+        } = serde_json::from_slice(&body)?;
+        token.or(access_token).ok_or_else(|| {
+            ErrorCode::Unauthorized(format!("token response from {realm} is missing token"))
+        })
+    }
+
+    /// Parses a single `WWW-Authenticate` challenge into its scheme and
+    /// lower-cased auth-params, e.g.
+    /// `Bearer realm="https://auth.example/token",service="example",scope="repository:foo:pull"`
+    fn parse_www_authenticate(value: &str) -> Option<(String, BTreeMap<String, String>)> {
+        let value = value.trim();
+        let (scheme, rest) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
+        if scheme.is_empty() {
+            return None;
+        }
+
+        let mut params = BTreeMap::new();
+        let mut chars = rest.chars().peekable();
+        loop {
+            while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
+            if chars.peek().is_none() {
+                break;
+            }
+
+            let mut key = String::new();
+            while let Some(c) = chars.next_if(|c| *c != '=' && *c != ',') {
+                key.push(c);
+            }
+            if chars.next_if_eq(&'=').is_none() {
+                // token68 or malformed param, not used by registries
+                continue;
+            }
+            while chars.next_if(|c| c.is_whitespace()).is_some() {}
+
+            let mut val = String::new();
+            if chars.next_if_eq(&'"').is_some() {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => val.extend(chars.next()),
+                        '"' => break,
+                        _ => val.push(c),
+                    }
+                }
+            } else {
+                while let Some(c) = chars.next_if(|c| *c != ',') {
+                    val.push(c);
+                }
+            }
+            params.insert(key.trim().to_ascii_lowercase(), val.trim().to_string());
+        }
+
+        Some((scheme.to_string(), params))
+    }
+
+    async fn decode_transport_error(
+        body: StreamReader<u8>,
+        status: u16,
+        headers: Vec<(String, String)>,
+    ) -> ErrorCode {
+        if status == 429 {
+            let after = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("Retry-After"))
+                .map(|(_, v)| {
+                    if let Ok(seconds) = v.parse::<u32>() {
+                        return Some(RetryAfter::DelaySeconds(seconds));
+                    }
+                    if let Ok(date) = httpdate::parse_http_date(v) {
+                        let seconds = date
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            .try_into()
+                            .unwrap();
+                        if seconds == 0 {
+                            return None;
+                        }
+                        return Some(RetryAfter::Date(Instant {
+                            seconds: seconds,
+                            nanoseconds: 0,
+                        }));
+                    }
+                    None
+                })
+                .flatten();
+            return ErrorCode::Toomanyrequests(after);
+        }
+
+        let body = body.collect().await;
+
+        let transport_errors: serde_json::Result<TransportErrors> = serde_json::from_slice(&body);
+        if transport_errors.is_err() {
+            return ErrorCode::Other(Some(format!(
+                "transport error with http status {status}: {}",
+                transport_errors.unwrap_err()
+            )));
+        }
+        let transport_errors = transport_errors.unwrap();
+        if transport_errors.errors.len() == 0 {
+            return ErrorCode::Other(Some(format!(
+                "transport error with http status {status}: unspecified errors"
+            )));
+        }
+        let error = transport_errors.errors.get(0).unwrap();
+
+        match error.code.as_str() {
+            "BLOB_UNKNOWN" => ErrorCode::BlobUnknown(error.message.to_string()),
+            "BLOB_UPLOAD_INVALID" => ErrorCode::BlobUploadInvalid(error.message.to_string()),
+            "BLOB_UPLOAD_UNKNOWN" => ErrorCode::BlobUploadUnknown(error.message.to_string()),
+            "DIGEST_INVALID" => ErrorCode::DigestInvalid(error.message.to_string()),
+            "MANIFEST_BLOB_UNKNOWN" => ErrorCode::ManifestBlobUnknown(error.message.to_string()),
+            "MANIFEST_INVALID" => ErrorCode::ManifestInvalid(error.message.to_string()),
+            "MANIFEST_UNKNOWN" => ErrorCode::ManifestUnknown(error.message.to_string()),
+            "NAME_INVALID" => ErrorCode::NameInvalid(error.message.to_string()),
+            "NAME_UNKNOWN" => ErrorCode::NameUnknown(error.message.to_string()),
+            "SIZE_INVALID" => ErrorCode::SizeInvalid(error.message.to_string()),
+            "UNAUTHORIZED" => ErrorCode::Unauthorized(error.message.to_string()),
+            "DENIED" => ErrorCode::Denied(error.message.to_string()),
+            "UNSUPPORTED" => ErrorCode::Unsupported(error.message.to_string()),
+            _ => ErrorCode::Other(Some(error.message.to_string())),
+        }
+    }
+
+    fn assert_digest(expected_digest: Digest, actual_digest: Digest) -> Result<(), ErrorCode> {
+        if expected_digest != actual_digest {
+            Err(ErrorCode::DigestInvalid(format!(
+                "digest mismatch: expected = {expected_digest}, actual = {actual_digest}",
+            )))?
+        }
+        Ok(())
+    }
+}
+
+/// Computes a digest incrementally, e.g. as content streams from the registry
+enum DigestHasher {
+    Sha256(sha2::Sha256),
+    Sha512(sha2::Sha512),
+}
+
+impl DigestHasher {
+    fn new(algorithm: &DigestAlgorithm) -> Result<Self, ErrorCode> {
+        match algorithm {
+            DigestAlgorithm::Sha256 => Ok(Self::Sha256(sha2::Sha256::new())),
+            DigestAlgorithm::Sha512 => Ok(Self::Sha512(sha2::Sha512::new())),
+            _ => Err(ErrorCode::DigestInvalid(format!(
+                "unsupported algorithm: {}",
+                algorithm
+            ))),
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Sha256(hasher) => hasher.update(bytes),
+            Self::Sha512(hasher) => hasher.update(bytes),
+        }
+    }
+
+    fn finalize(self) -> Digest {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        match self {
+            Self::Sha256(hasher) => Digest {
+                algorithm: DigestAlgorithm::Sha256,
+                encoded: hex(&hasher.finalize()),
+            },
+            Self::Sha512(hasher) => Digest {
+                algorithm: DigestAlgorithm::Sha512,
+                encoded: hex(&hasher.finalize()),
+            },
+        }
+    }
 }
 
 impl From<http::ErrorCode> for ErrorCode {
@@ -1702,7 +1820,7 @@ mod tests {
         };
 
         assert_eq!(
-            OCIClient::parse_www_authenticate(
+            Transport::parse_www_authenticate(
                 r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull,push""#
             ),
             Some((
@@ -1715,7 +1833,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            OCIClient::parse_www_authenticate(
+            Transport::parse_www_authenticate(
                 r#"Basic Realm = "a \"quoted\" realm" , charset=UTF-8"#
             ),
             Some((
@@ -1724,10 +1842,10 @@ mod tests {
             )),
         );
         assert_eq!(
-            OCIClient::parse_www_authenticate("Bearer"),
+            Transport::parse_www_authenticate("Bearer"),
             Some(("Bearer".to_string(), params(&[]))),
         );
-        assert_eq!(OCIClient::parse_www_authenticate("  "), None);
+        assert_eq!(Transport::parse_www_authenticate("  "), None);
     }
 
     #[test]

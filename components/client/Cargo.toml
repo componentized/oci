@@ -15,5 +15,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
-wit-bindgen = { workspace = true }
+wit-bindgen = { workspace = true, features = ["async-spawn"] }
 
+[dev-dependencies]
+test-harness = { workspace = true }
+tokio = { workspace = true }
+wasmtime = { workspace = true }
