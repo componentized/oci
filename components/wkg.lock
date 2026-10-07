@@ -7,9 +7,9 @@ name = "componentized:http"
 registry = "componentized.dev"
 
 [[packages.versions]]
-requirement = "=0.1.0-dev"
-version = "0.1.0-dev"
-digest = "sha256:f74b53af4b5ecb4c77e8bd47887920e0626efb2e45e8a9386f2519910faf5e5c"
+requirement = "=0.1.0"
+version = "0.1.0"
+digest = "sha256:2a8f5b6658165f9773c751718793ea6c2c5c7678ecd250fc58d9aa20b9abc041"
 
 [[packages]]
 name = "wasi:clocks"
@@ -19,12 +19,3 @@ registry = "wasi.dev"
 requirement = "=0.3.0"
 version = "0.3.0"
 digest = "sha256:59e1f4079e64ada450e19ffc9d08854c904e356ed8cc1fda36ff4fe150264db2"
-
-[[packages]]
-name = "wasi:http"
-registry = "wasi.dev"
-
-[[packages.versions]]
-requirement = "=0.3.0"
-version = "0.3.0"
-digest = "sha256:92cd8f3730c00226dc15626a2e7b21834dd187fc221f09818720d228585bbbf7"
