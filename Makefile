@@ -159,8 +159,10 @@ $(foreach dir,$(WKG_DIRS),$(eval $(call FETCH_WIT,$(dir))))
 
 # sign published components with cosign, `SIGN=false` to push without signing, e.g. to a local registry
 SIGN ?= true
+# append each published file and its image to this file, e.g. `client.wasm ghcr.io/componentized/oci/client:0.1.0@sha256:...`
+PUBLISH_LOG ?=
 
-# the files that can be published, e.g. gate.wasm, published from target/components/gate/gate.wasm
+# the files that can be published, e.g. client.wasm, published from target/components/client/client.wasm
 PUBLISH_FILES := interface.wasm $(foreach component,$(filter-out dep-% test-%,$(COMPONENTS)),$(component).wasm $(component).debug.wasm)
 
 .PHONY: publish ## Publish each component in the target/components directory
@@ -168,43 +170,5 @@ publish: $(addprefix publish-,$(PUBLISH_FILES))
 
 .PHONY: $(addprefix publish-,$(PUBLISH_FILES))
 $(addprefix publish-,$(PUBLISH_FILES)): publish-%: | $(call tool,wkg)
-ifndef VERSION
-	$(error VERSION is undefined)
-endif
-ifndef REPOSITORY
-	$(error REPOSITORY is undefined)
-endif
-	@$(eval FILE := $(@:publish-%=%))
-	@$(eval COMPONENT := $(patsubst %.wasm,%,$(patsubst %.debug.wasm,%,$(FILE))))
-# components are in a directory of their own, the interface is not, e.g. gate/gate.wasm and interface.wasm
-	@$(eval COMPONENT_FILE := $(if $(filter interface.wasm,$(FILE)),$(FILE),$(COMPONENT)/$(FILE)))
-	@$(eval README := ${COMPONENTS_DIR}/$(dir $(COMPONENT_FILE))README.md)
-	@$(eval TITLE := $(subst /,:,$(GITHUB_REPOSITORY))$(if $(filter interface,$(COMPONENT)),,-$(COMPONENT))$(if $(filter %.debug.wasm,$(FILE)), (debug)))
-	@$(eval DESCRIPTION := $(shell head -n 3 "$(README)" | tail -n 1))
-	@$(eval COMMIT := $(shell git rev-parse HEAD))
-	@$(eval README_DIR := $(if $(wildcard components/$(COMPONENT)/README.md),/components/$(COMPONENT)))
-	@$(eval URL := https://github.com/${GITHUB_REPOSITORY}/tree/${COMMIT}${README_DIR})
-	@$(eval REVISION := ${COMMIT}$(shell git diff --quiet HEAD || echo "+dirty"))
-	@$(eval COMPONENT_VERSION := $(if $(filter %.debug.wasm,$(FILE)),${VERSION}+debug,${VERSION}))
-	@$(eval TAG := $(patsubst v%,%,$(subst +,_,$(COMPONENT_VERSION))))
-	@$(eval IMAGE := $(if $(filter interface.wasm,$(FILE)),${REPOSITORY}:${TAG},${REPOSITORY}/${COMPONENT}:${TAG}))
-
-	@echo "::group::${FILE} -> ${IMAGE}"
-	@set -o pipefail ; \
-	DIGEST=$$( \
-		wkg oci push \
-			--annotation "org.opencontainers.image.title=${TITLE}" \
-			--annotation "org.opencontainers.image.description=${DESCRIPTION}" \
-			--annotation "org.opencontainers.image.version=${COMPONENT_VERSION}" \
-			--annotation "org.opencontainers.image.url=${URL}" \
-			--annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}.git" \
-			--annotation "org.opencontainers.image.revision=${REVISION}" \
-			--annotation "org.opencontainers.image.licenses=Apache-2.0" \
-			"${IMAGE}" \
-			"${COMPONENTS_DIR}/${COMPONENT_FILE}" \
-			2>&1 \
-			| tee /dev/stderr \
-			| grep -o 'sha256:[a-f0-9]\{64\}' \
-	) && \
-	$(if $(filter true,$(SIGN)),cosign sign --yes "${IMAGE}@$${DIGEST}",echo "Not signing ${IMAGE}@$${DIGEST}, SIGN=${SIGN}")
-	@echo "::endgroup::"
+	@VERSION="$(VERSION)" REPOSITORY="$(REPOSITORY)" COMPONENTS_DIR="$(COMPONENTS_DIR)" SIGN="$(SIGN)" PUBLISH_LOG="$(PUBLISH_LOG)" \
+		scripts/publish.sh $*
