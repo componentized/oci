@@ -45,15 +45,6 @@ interface client {
         delay-seconds(u32),
     }
 
-    /// schmea version for OCI manifests, should always be 2
-    @since(version = 0.1.0-dev)
-    variant schema-version {
-        /// literal 2. Prefixed with a 'v' to bypass wit naming constrains
-        v2,
-        /// a non-2 value, the parsed manifest may be incomplete or otherwise inaccurate.
-        other(option<u8>),
-    }
-
     /// common media types for oci artifacts
     @since(version = 0.1.0-dev)
     variant media-type {
@@ -129,8 +120,8 @@ interface client {
     /// https://github.com/opencontainers/image-spec/blob/main/manifest.md
     @since(version = 0.1.0-dev)
     record oci-image-manifest-v1 {
-        /// manifest schema version
-        schema-version: schema-version,
+        /// manifest schema version, must be 2
+        schema-version: option<u8>,
         /// must contain the media type 'application/vnd.oci.image.manifest.v1+json'.
         media-type: media-type,
         /// type of an artifact when the manifest is used for an artifact
@@ -149,8 +140,8 @@ interface client {
     /// https://github.com/opencontainers/image-spec/blob/main/image-index.md
     @since(version = 0.1.0-dev)
     record oci-image-index-manifest-v1 {
-        /// manifest schema version
-        schema-version: schema-version,
+        /// manifest schema version, must be 2
+        schema-version: option<u8>,
         /// must contain the media type 'application/vnd.oci.image.index.v1+json'.
         media-type: media-type,
         /// type of an artifact when the manifest is used for an artifact
@@ -340,9 +331,21 @@ interface client {
     @since(version = 0.1.0-dev)
     record digest {
         /// hashing algorithm. `sha256` is strongly recommended
-        algorithm: string,
+        algorithm: digest-algorithm,
         /// digest value. Format is defined by the algorithm.
         encoded: string,
+    }
+
+    /// Content digest algorithm
+    variant digest-algorithm {
+        /// 256-bit secure hash
+        /// https://csrc.nist.gov/pubs/fips/180-4/upd1/final
+        sha256,
+        /// 512-bit secure hash
+        /// https://csrc.nist.gov/pubs/fips/180-4/upd1/final
+        sha512,
+        /// other algorithms may not be supported by the registry or client
+        other(string),
     }
 
     /// Parse a string image reference like `ubuntu` or `ghcr.io/componentized/oci:1.0.0` for use by the other methods.

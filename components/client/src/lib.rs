@@ -11,13 +11,12 @@ use wit_bindgen::StreamReader;
 use crate::{
     componentized::http::client::{self as http, HttpResponse},
     exports::componentized::oci::client::{
-        Config, Digest, ErrorCode, Guest, Instant, Manifest,
+        Config, Digest, DigestAlgorithm, ErrorCode, Guest, Instant, Manifest,
         MediaType::{self, Other},
         MediaTypeSuffix, OciDescriptorV1, OciImageConfigV1, OciImageConfigV1Config,
         OciImageConfigV1ContentAddresses, OciImageConfigV1HistoryEntry, OciImageIndexManifestV1,
         OciImageIndexManifestV1Manifest, OciImageIndexManifestV1ManifestPlatform,
-        OciImageManifestV1, Reference, RetryAfter, SchemaVersion, WasmConfigV0,
-        WasmConfigV0Component,
+        OciImageManifestV1, Reference, RetryAfter, WasmConfigV0, WasmConfigV0Component,
     },
 };
 
@@ -63,7 +62,7 @@ impl Guest for OCIClient {
         } = Self::get(url, vec![]).await?;
 
         match status {
-            200 => Self::compute_digest("sha256", &body.collect().await),
+            200 => Self::compute_digest(&DigestAlgorithm::Sha256, &body.collect().await),
             _ => Err(Self::decode_transport_error(body, status, headers).await),
         }
     }
@@ -330,6 +329,10 @@ impl OCIClient {
                         "invalid checksum digest format: {encoded}"
                     ))))?
                 }
+                Ok(Digest {
+                    algorithm: DigestAlgorithm::Sha256,
+                    encoded,
+                })
             }
             "sha512" => {
                 let re = Regex::new(r"^[a-f0-9]{128}$").unwrap();
@@ -338,16 +341,18 @@ impl OCIClient {
                         "invalid checksum digest format: {encoded}"
                     ))))?
                 }
+                Ok(Digest {
+                    algorithm: DigestAlgorithm::Sha512,
+                    encoded,
+                })
             }
-            _ => Err(ErrorCode::Other(Some(format!(
+            algorithm => Err(ErrorCode::Other(Some(format!(
                 "unsupported digest algorithm: {algorithm}"
             ))))?,
         }
-
-        Ok(Digest { algorithm, encoded })
     }
 
-    fn compute_digest(algorithm: &str, bytes: &[u8]) -> Result<Digest, ErrorCode> {
+    fn compute_digest(algorithm: &DigestAlgorithm, bytes: &[u8]) -> Result<Digest, ErrorCode> {
         fn hash_hex<D: sha2::Digest>(bytes: &[u8]) -> String {
             let mut hasher = D::new();
             hasher.update(bytes);
@@ -358,19 +363,20 @@ impl OCIClient {
                 .collect()
         }
 
-        let encoded = match algorithm {
-            "sha256" => hash_hex::<sha2::Sha256>(bytes),
-            "sha512" => hash_hex::<sha2::Sha512>(bytes),
+        match algorithm {
+            DigestAlgorithm::Sha256 => Ok(Digest {
+                algorithm: algorithm.clone(),
+                encoded: hash_hex::<sha2::Sha256>(bytes),
+            }),
+            DigestAlgorithm::Sha512 => Ok(Digest {
+                algorithm: algorithm.clone(),
+                encoded: hash_hex::<sha2::Sha512>(bytes),
+            }),
             _ => Err(ErrorCode::DigestInvalid(format!(
                 "unsupported algorithm: {}",
                 algorithm
-            )))?,
-        };
-
-        Ok(Digest {
-            algorithm: algorithm.to_string(),
-            encoded,
-        })
+            ))),
+        }
     }
 
     fn assert_digest(expected_digest: Digest, bytes: &[u8]) -> Result<(), ErrorCode> {
@@ -584,12 +590,9 @@ impl OCIClient {
     fn parse_oci_image_index_v1(v: &Value, field: &str) -> Result<Option<Manifest>, ErrorCode> {
         Self::parse_object(v, field, |v, _field| {
             Ok(Manifest::OciImageIndexV1(OciImageIndexManifestV1 {
-                schema_version: Self::required(
-                    Self::parse_schema_version(
-                        &v["schemaVersion"],
-                        &format!("{field}.schemaVersion"),
-                    ),
-                    "schemaVersion",
+                schema_version: Self::parse_u8(
+                    &v["schemaVersion"],
+                    &format!("{field}.schemaVersion"),
                 )?,
                 media_type: Self::required(
                     Self::parse_media_type(&v["mediaType"], &format!("{field}.mediaType")),
@@ -716,11 +719,8 @@ impl OCIClient {
     fn parse_oci_image_manifest_v1(v: &Value, field: &str) -> Result<Option<Manifest>, ErrorCode> {
         Self::parse_object(v, field, |v, _field| {
             Ok(Manifest::OciImageV1(OciImageManifestV1 {
-                schema_version: Self::required(
-                    Self::parse_schema_version(
-                        &v["schemaVersion"],
-                        &format!("{field}.schemaVersion"),
-                    ),
+                schema_version: Self::parse_u8(
+                    &v["schemaVersion"],
                     &format!("{field}.schemaVersion"),
                 )?,
                 media_type: Self::required(
@@ -1034,16 +1034,6 @@ impl OCIClient {
         }
     }
 
-    fn parse_schema_version(v: &Value, field: &str) -> Result<Option<SchemaVersion>, ErrorCode> {
-        match Self::parse_u8(v, field)? {
-            Some(version) => match version {
-                2 => Ok(Some(SchemaVersion::V2)),
-                _ => Ok(Some(SchemaVersion::Other(Some(version as u8)))),
-            },
-            None => Ok(None),
-        }
-    }
-
     fn parse_digest(v: &Value, field: &str) -> Result<Option<Digest>, ErrorCode> {
         match Self::parse_string(v, field)? {
             Some(digest) => Ok(Some(Self::digest(digest)?)),
@@ -1116,9 +1106,9 @@ struct TransportError {
 impl From<http::ErrorCode> for ErrorCode {
     fn from(value: http::ErrorCode) -> Self {
         match value {
-            http::ErrorCode::RedirectLimitExceeded((_, count)) => Self::Other(Some(format!(
-                "too many redirects, stopped after {count}"
-            ))),
+            http::ErrorCode::RedirectLimitExceeded((_, count)) => {
+                Self::Other(Some(format!("too many redirects, stopped after {count}")))
+            }
             http::ErrorCode::RedirectRequiresBody(_) => Self::Other(Some(
                 "redirect requires resending the request body".to_string(),
             )),
@@ -1146,6 +1136,16 @@ impl Display for Digest {
     }
 }
 
+impl Display for DigestAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sha256 => f.write_str("sha256"),
+            Self::Sha512 => f.write_str("sha512"),
+            Self::Other(algorithm) => f.write_str(algorithm),
+        }
+    }
+}
+
 impl PartialEq for Reference {
     fn eq(&self, other: &Self) -> bool {
         self.registry == other.registry
@@ -1158,6 +1158,17 @@ impl PartialEq for Reference {
 impl PartialEq for Digest {
     fn eq(&self, other: &Self) -> bool {
         self.algorithm == other.algorithm && self.encoded == other.encoded
+    }
+}
+
+impl PartialEq for DigestAlgorithm {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DigestAlgorithm::Sha256, DigestAlgorithm::Sha256) => true,
+            (DigestAlgorithm::Sha512, DigestAlgorithm::Sha512) => true,
+            (DigestAlgorithm::Other(this), DigestAlgorithm::Other(that)) => this == that,
+            _ => false,
+        }
     }
 }
 
@@ -1259,16 +1270,6 @@ impl PartialEq for MediaTypeSuffix {
             (MediaTypeSuffix::Gzip, MediaTypeSuffix::Gzip) => true,
             (MediaTypeSuffix::Zstd, MediaTypeSuffix::Zstd) => true,
             (MediaTypeSuffix::Other(this), MediaTypeSuffix::Other(other)) => this == other,
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq for SchemaVersion {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (SchemaVersion::V2, SchemaVersion::V2) => true,
-            (SchemaVersion::Other(this), SchemaVersion::Other(other)) => this == other,
             _ => false,
         }
     }
@@ -1452,9 +1453,17 @@ mod tests {
         Some(tag.to_string())
     }
 
-    fn make_digest(algorithm: &str, encoded: &str) -> Option<Digest> {
+    fn make_digest_sha256(encoded: &str) -> Option<Digest> {
+        make_digest(DigestAlgorithm::Sha256, encoded)
+    }
+
+    fn make_digest_sha512(encoded: &str) -> Option<Digest> {
+        make_digest(DigestAlgorithm::Sha512, encoded)
+    }
+
+    fn make_digest(algorithm: DigestAlgorithm, encoded: &str) -> Option<Digest> {
         Some(Digest {
-            algorithm: algorithm.to_string(),
+            algorithm,
             encoded: encoded.to_string(),
         })
     }
@@ -1608,7 +1617,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     None,
-                    make_digest("sha256", sha256),
+                    make_digest_sha256(sha256),
                 ),
                 description: "valid sha256 digest",
             },
@@ -1618,7 +1627,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     None,
-                    make_digest("sha512", sha512),
+                    make_digest_sha512(sha512),
                 ),
                 description: "valid sha512 digest",
             },
@@ -1628,7 +1637,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     make_tag("v1"),
-                    make_digest("sha256", sha256),
+                    make_digest_sha256(sha256),
                 ),
                 description: "valid tag and digest",
             },
@@ -1667,7 +1676,7 @@ mod tests {
                     "index.docker.io",
                     "foo/bar",
                     make_tag("v1"),
-                    make_digest("sha256", sha256),
+                    make_digest_sha256(sha256),
                 ),
                 description: "when both a tag and a digest are present, the digest wins and the tag is dropped",
             },
@@ -1763,7 +1772,7 @@ mod tests {
                 artifact_type: None,
                 config: OciDescriptorV1 {
                     annotations: None,
-                    digest: Digest { algorithm: "sha256".to_string(), encoded: "80d83bbdaa82cff96584c99217c29fd17bc7e5f0424c0cb26aa3831ea18132b4".to_string() },
+                    digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "80d83bbdaa82cff96584c99217c29fd17bc7e5f0424c0cb26aa3831ea18132b4".to_string() },
                     media_type: MediaType::ApplicationVndWasmConfigV0(MediaTypeSuffix::Json),
                     size: 345,
                     urls: None,
@@ -1774,7 +1783,7 @@ mod tests {
                     annotations: Some(BTreeMap::from([
                         ("org.opencontainers.image.title".to_string(), "client.wasm".to_string()),
                     ])),
-                    digest: Digest { algorithm: "sha256".to_string(), encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db".to_string() },
+                    digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db".to_string() },
                     media_type: MediaType::ApplicationWasm,
                     size: 1894585,
                     urls: None,
@@ -1782,7 +1791,7 @@ mod tests {
                     data: None,
                  }],
                 media_type: MediaType::ApplicationVndOciImageManifestV1(MediaTypeSuffix::Json),
-                schema_version: SchemaVersion::V2,
+                schema_version: Some(2 as u8),
                 subject: None,
             })),
         );
@@ -1815,7 +1824,7 @@ mod tests {
                 ]
             }), "").unwrap(),
             Some(Manifest::OciImageIndexV1(OciImageIndexManifestV1 {
-                schema_version: SchemaVersion::V2,
+                schema_version: Some(2 as u8),
                 media_type: MediaType::ApplicationVndOciImageIndexV1(MediaTypeSuffix::Json),
                 artifact_type: None,
                 manifests: vec![
@@ -1831,7 +1840,7 @@ mod tests {
                             variant:None,
                         }),
                         subject:None,
-                        digest: Digest { algorithm: "sha256".to_string(), encoded: "9434033b4008b51c0c9270dda9315ea4229901fee28a7980085091e9fd4b62b8".to_string() },
+                        digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "9434033b4008b51c0c9270dda9315ea4229901fee28a7980085091e9fd4b62b8".to_string() },
                         urls: None,
                         data: None,
                         artifact_type: Some(MediaType::Other("application/vnd.docker.container.image.v1+json".to_string()))
@@ -1846,7 +1855,7 @@ mod tests {
                             os_features:None,os_version:None,variant:None,
                         }),
                         subject:None,
-                        digest: Digest { algorithm: "sha256".to_string(), encoded: "eac7a2bcae76b2bc5b5fed23033ffba56283462e315c2035b6ab5b2c8c80bd34".to_string() },
+                        digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "eac7a2bcae76b2bc5b5fed23033ffba56283462e315c2035b6ab5b2c8c80bd34".to_string() },
                         urls: None,
                         data: None,
                         artifact_type: Some(MediaType::Other("application/vnd.docker.container.image.v1+json".to_string())),
@@ -1948,9 +1957,9 @@ mod tests {
                 rootfs: OciImageConfigV1ContentAddresses {
                     type_: "layers".to_string(),
                     diff_ids: vec![
-                        Digest{algorithm:"sha256".to_string(), encoded:"458136df58646e7146e8240b685e4e6bfffa019ba10d3c221ff59b3928f54d8c".to_string()},
-                        Digest{algorithm:"sha256".to_string(), encoded:"ffe56a1c5f3878e9b5f803842adb9e2ce81584b6bd027e8599582aefe14a975b".to_string()},
-                        Digest{algorithm:"sha256".to_string(), encoded:"38217aaa0c148dcb7f3af90a384d30ccb4a7736a9f15b75a5d6a9f28c586964b".to_string()},
+                        Digest{algorithm:DigestAlgorithm::Sha256, encoded:"458136df58646e7146e8240b685e4e6bfffa019ba10d3c221ff59b3928f54d8c".to_string()},
+                        Digest{algorithm:DigestAlgorithm::Sha256, encoded:"ffe56a1c5f3878e9b5f803842adb9e2ce81584b6bd027e8599582aefe14a975b".to_string()},
+                        Digest{algorithm:DigestAlgorithm::Sha256, encoded:"38217aaa0c148dcb7f3af90a384d30ccb4a7736a9f15b75a5d6a9f28c586964b".to_string()},
                     ]
                 },
                 config: Some(OciImageConfigV1Config{
@@ -2015,7 +2024,7 @@ mod tests {
                 architecture: "wasm".to_string(),
                 os: "wasip2".to_string(),
                 layer_digests: vec![Digest {
-                    algorithm: "sha256".to_string(),
+                    algorithm: DigestAlgorithm::Sha256,
                     encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db"
                         .to_string()
                 }],
