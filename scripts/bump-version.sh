@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 
-# Bump the version of the wit interface package, and of the crates.
+# Bump the version of the wit interface package.
 #
 #   scripts/bump-version.sh <new-version>
 #
 # Updates the package declaration and every reference to the package in tracked files, then
-# refreshes the generated wit dependencies. The crates share the interface's version: the
-# workspace version the crates inherit, and the workspace's requirement on the library, move to the
-# new version too. Items whose `@since` names an unreleased (prerelease)
+# refreshes the generated wit dependencies. Items whose `@since` names an unreleased (prerelease)
 # version move to the new version, since they were never published under the old one. Items
 # released under the old version keep their `@since`.
 #
@@ -19,8 +17,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PACKAGE="${PACKAGE:-componentized:$(basename $(git rev-parse --show-toplevel))}"
-# the library crate, the workspace's requirement on it moves to the new version
-LIBRARY="${LIBRARY:-componentized-constants}"
 SEMVER='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 
 new="${1:-}"
@@ -70,7 +66,7 @@ fi
 
 old_re="${old//./\\.}"
 # references to the package or one of its interfaces, an interface named for a keyword is escaped
-# with `%`, e.g. `componentized:constants/%u8@0.1.0`
+# with `%`, e.g. `componentized:oci/client@0.1.0`
 ref_re="${PACKAGE}(/%?[a-z0-9-]+)?"
 # the fetched wit dependencies and the wkg.lock files are left to `make wit`, wkg replaces the
 # dependencies and updates the locks for the new version
@@ -89,12 +85,6 @@ if [[ "$old" == *-* ]]; then
         echo "updated @since in ${file}"
     done
 fi
-
-# the version in the [workspace.package] section, inherited by the crates
-perl -pi -e 'if (/^\[workspace\.package\]/ .. /^\[(?!workspace\.package\])/) { s/^version = "[^"]*"/version = "'"${new}"'"/ }' Cargo.toml
-echo "updated the workspace version in Cargo.toml"
-perl -pi -e 's/^(\Q'"${LIBRARY}"'\E = \{.*\bversion = ")[^"]*(")/${1}'"${new}"'${2}/' Cargo.toml
-echo "updated the ${LIBRARY} requirement in Cargo.toml"
 
 perl -pi -e 's{^(\s+)\Q'"${workflow_default}"'\E$}{${1}'"${workflow_default/\"${old}\"/\"${new}\"}"'}' "$workflow"
 echo "updated the default version in ${workflow}"

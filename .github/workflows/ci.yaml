@@ -100,16 +100,29 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || (github.ref == 'refs/heads/main' && contains(steps.interface_version.outputs.VERSION, '-'))
         run: make publish
         env:
+          PUBLISH_LOG: "${{ runner.temp }}/published.txt"
           REPOSITORY: "ghcr.io/${{ github.repository }}"
           VERSION: "${{ case(github.ref == 'refs/heads/main', steps.interface_version.outputs.VERSION, steps.tag_version.outputs.VERSION) }}"
+      - name: Draft release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          {
+            echo "## Published components"
+            echo
+            echo "| File | Image |"
+            echo "| --- | --- |"
+            while read -r file image ; do
+              echo "| \`${file}\` | \`${image}\` |"
+            done < "${RUNNER_TEMP}/published.txt"
+          } > "${RUNNER_TEMP}/release-notes.md"
+          cat "${RUNNER_TEMP}/release-notes.md"
       - name: Draft GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
           draft: true
+          body_path: ${{ runner.temp }}/release-notes.md
           files: |
-            target/components/*.wasm
-            target/components/*/*.wasm
             components.tar
           fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}
