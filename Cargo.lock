@@ -173,23 +173,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "client"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "httpdate",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "test-harness",
- "tokio",
- "url",
- "wasmtime",
- "wit-bindgen",
-]
-
-[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -907,6 +890,23 @@ dependencies = [
  "hashbrown 0.17.1",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "internal-client"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "httpdate",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "test-harness",
+ "tokio",
+ "url",
+ "wasmtime",
+ "wit-bindgen",
 ]
 
 [[package]]

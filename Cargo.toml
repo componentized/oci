@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "components/client",
+    "components/internal-client",
     "crates/test-harness",
 ]
 
