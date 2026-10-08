@@ -1,4 +1,4 @@
-package componentized:oci@0.1.0-dev;
+package componentized:oci@0.1.0;
 
 world imports {
     import client;

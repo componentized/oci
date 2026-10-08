@@ -1,10 +1,10 @@
-@since(version = 0.1.0-dev)
+@since(version = 0.1.0)
 interface client {
 
     use wasi:clocks/system-clock@0.3.0.{ instant };
 
     /// Error codes defined by the OCI distribution spec, or other
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     variant error-code {
         /// blob unknown to registry (code-1 `BLOB_UNKNOWN`)
         blob-unknown(string),
@@ -39,7 +39,7 @@ interface client {
     }
 
     /// time when a failed request should not be retried until. Part of code-14 `TOOMANYREQUESTS` error response
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     variant retry-after {
         date(instant),
         delay-seconds(u32),
@@ -47,12 +47,12 @@ interface client {
 
     /// Media type describing the content semantics and encoding
     /// https://specs.opencontainers.org/image-spec/media-types/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     type media-type = string;
 
     /// OCI Descriptor v1
     /// https://specs.opencontainers.org/image-spec/descriptor/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-descriptor-v1 {
         /// media type of the referenced content
         media-type: media-type,
@@ -71,7 +71,7 @@ interface client {
     }
 
     /// OCI Manifests
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     variant manifest {
         /// oci image
         oci-image-v1(oci-image-manifest-v1),
@@ -83,7 +83,7 @@ interface client {
 
     /// OCI Image Manifest v1
     /// https://specs.opencontainers.org/image-spec/manifest/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-manifest-v1 {
         /// manifest schema version, must be 2
         schema-version: option<u8>,
@@ -103,7 +103,7 @@ interface client {
 
     /// OCI Image Index v1
     /// https://specs.opencontainers.org/image-spec/image-index/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-index-manifest-v1 {
         /// manifest schema version, must be 2
         schema-version: option<u8>,
@@ -121,7 +121,7 @@ interface client {
 
     /// OCI Image Index v1 - manifest entry
     /// https://specs.opencontainers.org/image-spec/image-index/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-index-manifest-v1-manifest {
         /// media type of the referenced content
         media-type: media-type,
@@ -146,7 +146,7 @@ interface client {
 
     /// OCI Image Index v1 - manifest entry platform
     /// https://specs.opencontainers.org/image-spec/image-index/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-index-manifest-v1-manifest-platform {
         /// CPU architecture which the binaries in this image are built to run on
         architecture: string,
@@ -161,7 +161,7 @@ interface client {
     }
 
     /// OCI Configs
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     variant config {
         /// oci iamge
         oci-image-v1(oci-image-config-v1),
@@ -173,7 +173,7 @@ interface client {
 
     /// OCI Image Config v1
     /// https://specs.opencontainers.org/image-spec/config/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-config-v1 {
         /// combined date and time at which the image was created
         created: option<instant>,
@@ -199,7 +199,7 @@ interface client {
 
     /// OCI Image Config v1 - config
     /// https://specs.opencontainers.org/image-spec/config/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-config-v1-config {
         /// username or UID which is a platform-specific structure that allows specific control over which user the process run as
         user: option<string>,
@@ -225,7 +225,7 @@ interface client {
 
     /// OCI Image Config v1 - content address
     /// https://specs.opencontainers.org/image-spec/config/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-config-v1-content-addresses {
         /// must be 'layers'
         %type: string,
@@ -235,7 +235,7 @@ interface client {
 
     /// OCI Image Config v1 - history entry
     /// https://specs.opencontainers.org/image-spec/config/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record oci-image-config-v1-history-entry {
         /// combined date and time at which the layer was created
         created: option<instant>,
@@ -251,7 +251,7 @@ interface client {
 
     /// WASM Config v0
     /// https://tag-runtime.cncf.io/wgs/wasm/deliverables/wasm-oci-artifact/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record wasm-config-v0 {
         // combined date and time at which the image was created
         created: option<instant>,
@@ -269,7 +269,7 @@ interface client {
 
     /// WASM Config v0 - component
     /// https://tag-runtime.cncf.io/wgs/wasm/deliverables/wasm-oci-artifact/
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record wasm-config-v0-component {
         /// items (interfaces, functions, types) exported by the component
         exports: list<string>,
@@ -280,7 +280,7 @@ interface client {
     }
 
     /// Image reference, typically created by `parse-reference(string)`
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record reference {
         /// host and port of the registry, defaults to `index.docker.io`
         registry: string,
@@ -293,7 +293,7 @@ interface client {
     }
 
     /// Content digest
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     record digest {
         /// hashing algorithm. `sha256` is strongly recommended
         algorithm: digest-algorithm,
@@ -315,12 +315,12 @@ interface client {
 
     /// Parse a string image reference like `ubuntu` or
     /// `ghcr.io/componentized/oci:1.0.0` for use by the other methods.
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     parse-reference: func(reference: string) -> result<reference, error-code>;
 
     /// Resolves a tagged reference to a digest with the registry. Digested
     /// references are returned immediately.
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     resolve-digest: async func(reference: reference) -> result<digest, error-code>;
 
     /// Gets a blob from the registry. The reference must be digested.
@@ -332,18 +332,18 @@ interface client {
     /// stream ends, with `digest-invalid` when the content does not match the
     /// digest. Content read from the stream must not be trusted until the
     /// future resolves successfully.
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     get-blob: async func(reference: reference) -> result<tuple<stream<u8>, future<result<_, error-code>>>, error-code>;
 
     /// Gets a config from the registry decoding by media type. In many cases,
     /// the media type cannot be inferred and must be passed explicitly. The
     /// reference must be digested.
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     get-config: async func(reference: reference, default-media-type: option<media-type>) -> result<config, error-code>;
 
     /// Gets a manifest from the registry decoding by media type. The reference
     /// may be tagged or digested.
-    @since(version = 0.1.0-dev)
+    @since(version = 0.1.0)
     get-manifest: async func(reference: reference) -> result<manifest, error-code>;
 
 }

@@ -1,5 +1,5 @@
 /// Common OCI related media types
-@since(version = 0.1.0-dev)
+@since(version = 0.1.0)
 interface media-types {
     /// Content Descriptor
     /// https://specs.opencontainers.org/image-spec/media-types/#oci-image-media-types

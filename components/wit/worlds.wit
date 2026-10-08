@@ -1,7 +1,7 @@
 package componentized:oci-components;
 
 world client {
-    import componentized:oci/media-types@0.1.0-dev;
+    import componentized:oci/media-types@0.1.0;
     import componentized:http/client@0.1.0;
-    export componentized:oci/client@0.1.0-dev;
+    export componentized:oci/client@0.1.0;
 }

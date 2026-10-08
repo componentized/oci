@@ -1,5 +1,5 @@
 package componentized:oci-component;
 
 world media-types {
-    export componentized:oci/media-types@0.1.0-dev;
+    export componentized:oci/media-types@0.1.0;
 }
