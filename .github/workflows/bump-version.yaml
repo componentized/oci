@@ -7,7 +7,7 @@ on:
         description: The new version of the interface package, e.g. 0.1.0 or 0.2.0-dev
         required: true
         type: string
-        default: "0.1.0" # the current version, kept current by scripts/bump-version.sh
+        default: "0.1.1-dev" # the current version, kept current by scripts/bump-version.sh
 
 jobs:
   # bumps the version with read only access, the changes are handed to the push job as a patch so
