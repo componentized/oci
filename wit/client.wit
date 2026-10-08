@@ -45,48 +45,13 @@ interface client {
         delay-seconds(u32),
     }
 
-    /// common media types for oci artifacts
+    /// Media type describing the content semantics and encoding
+    /// https://specs.opencontainers.org/image-spec/media-types/
     @since(version = 0.1.0-dev)
-    variant media-type {
-        /// content descriptor
-        application-vnd-oci-descriptor-v1(media-type-suffix),
-        /// oci layout
-        application-vnd-oci-layout-header-v1(media-type-suffix),
-        /// image index
-        application-vnd-oci-image-index-v1(media-type-suffix),
-        /// image manifest
-        application-vnd-oci-image-manifest-v1(media-type-suffix),
-        /// image config
-        application-vnd-oci-image-config-v1(media-type-suffix),
-        /// layer, as a tar archive
-        application-vnd-oci-image-layer-v1-tar(media-type-suffix),
-        /// empty for unused descriptors
-        application-vnd-oci-empty-v1(media-type-suffix),
-        /// layer, as a tar archive
-        application-vnd-oci-image-layer-nondistributable-v1-tar(media-type-suffix),
-        /// wasm config
-        application-vnd-wasm-config-v0(media-type-suffix),
-        /// wasm
-        application-wasm,
-        /// all other values
-        other(string),
-    }
-
-    /// encoding for a resource representation
-    @since(version = 0.1.0-dev)
-    variant media-type-suffix {
-        /// json encoded
-        json,
-        /// compressed with gzip
-        gzip,
-        /// compressed with zstd
-        zstd,
-        /// other encoding
-        other(option<string>),
-    }
+    type media-type = string;
 
     /// OCI Descriptor v1
-    /// https://github.com/opencontainers/image-spec/blob/main/descriptor.md
+    /// https://specs.opencontainers.org/image-spec/descriptor/
     @since(version = 0.1.0-dev)
     record oci-descriptor-v1 {
         /// media type of the referenced content
@@ -117,7 +82,7 @@ interface client {
     }
 
     /// OCI Image Manifest v1
-    /// https://github.com/opencontainers/image-spec/blob/main/manifest.md
+    /// https://specs.opencontainers.org/image-spec/manifest/
     @since(version = 0.1.0-dev)
     record oci-image-manifest-v1 {
         /// manifest schema version, must be 2
@@ -137,7 +102,7 @@ interface client {
     }
 
     /// OCI Image Index v1
-    /// https://github.com/opencontainers/image-spec/blob/main/image-index.md
+    /// https://specs.opencontainers.org/image-spec/image-index/
     @since(version = 0.1.0-dev)
     record oci-image-index-manifest-v1 {
         /// manifest schema version, must be 2
@@ -155,7 +120,7 @@ interface client {
     }
 
     /// OCI Image Index v1 - manifest entry
-    /// https://github.com/opencontainers/image-spec/blob/main/image-index.md
+    /// https://specs.opencontainers.org/image-spec/image-index/
     @since(version = 0.1.0-dev)
     record oci-image-index-manifest-v1-manifest {
         /// media type of the referenced content
@@ -180,7 +145,7 @@ interface client {
     }
 
     /// OCI Image Index v1 - manifest entry platform
-    /// https://github.com/opencontainers/image-spec/blob/main/image-index.md
+    /// https://specs.opencontainers.org/image-spec/image-index/
     @since(version = 0.1.0-dev)
     record oci-image-index-manifest-v1-manifest-platform {
         /// CPU architecture which the binaries in this image are built to run on
@@ -207,7 +172,7 @@ interface client {
     }
 
     /// OCI Image Config v1
-    /// https://github.com/opencontainers/image-spec/blob/main/config.md
+    /// https://specs.opencontainers.org/image-spec/config/
     @since(version = 0.1.0-dev)
     record oci-image-config-v1 {
         /// combined date and time at which the image was created
@@ -233,7 +198,7 @@ interface client {
     }
 
     /// OCI Image Config v1 - config
-    /// https://github.com/opencontainers/image-spec/blob/main/config.md
+    /// https://specs.opencontainers.org/image-spec/config/
     @since(version = 0.1.0-dev)
     record oci-image-config-v1-config {
         /// username or UID which is a platform-specific structure that allows specific control over which user the process run as
@@ -259,7 +224,7 @@ interface client {
     }
 
     /// OCI Image Config v1 - content address
-    /// https://github.com/opencontainers/image-spec/blob/main/config.md
+    /// https://specs.opencontainers.org/image-spec/config/
     @since(version = 0.1.0-dev)
     record oci-image-config-v1-content-addresses {
         /// must be 'layers'
@@ -269,7 +234,7 @@ interface client {
     }
 
     /// OCI Image Config v1 - history entry
-    /// https://github.com/opencontainers/image-spec/blob/main/config.md
+    /// https://specs.opencontainers.org/image-spec/config/
     @since(version = 0.1.0-dev)
     record oci-image-config-v1-history-entry {
         /// combined date and time at which the layer was created

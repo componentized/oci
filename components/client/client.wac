@@ -1,0 +1,6 @@
+package componentized:oci;
+
+export new local:internal-client {
+    media-types: new local:media-types {}.media-types,
+    ...
+}...;

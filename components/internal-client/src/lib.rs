@@ -8,12 +8,16 @@ use sha2::Digest as _;
 use url::Url;
 use wit_bindgen::{FutureReader, StreamReader, StreamResult};
 
+#[cfg(not(test))]
+use crate::componentized::oci::media_types;
+
 use crate::{
-    componentized::http::client::{self as http, HttpResponse},
+    componentized::{
+        http::client::{self as http, HttpResponse},
+    },
     exports::componentized::oci::client::{
-        Config, Digest, DigestAlgorithm, ErrorCode, Guest, Instant, Manifest,
-        MediaType::{self, Other},
-        MediaTypeSuffix, OciDescriptorV1, OciImageConfigV1, OciImageConfigV1Config,
+        Config, Digest, DigestAlgorithm, ErrorCode, Guest, Instant, Manifest, MediaType,
+        OciDescriptorV1, OciImageConfigV1, OciImageConfigV1Config,
         OciImageConfigV1ContentAddresses, OciImageConfigV1HistoryEntry, OciImageIndexManifestV1,
         OciImageIndexManifestV1Manifest, OciImageIndexManifestV1ManifestPlatform,
         OciImageManifestV1, Reference, RetryAfter, WasmConfigV0, WasmConfigV0Component,
@@ -24,11 +28,6 @@ pub(crate) struct OCIClient;
 
 /// the size of each read from the registry while streaming a blob
 const BLOB_CHUNK_SIZE: usize = 64 * 1024;
-
-/// the manifest media types the client accepts, a registry may serve a different manifest for a
-/// tag depending on the media types accepted
-const MANIFEST_ACCEPT: &str =
-    "application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json";
 
 impl Guest for OCIClient {
     #[allow(async_fn_in_trait)]
@@ -53,7 +52,16 @@ impl Guest for OCIClient {
         if let Some(digest) = digest {
             return Ok(digest);
         }
-        let headers = vec![("Accept".to_string(), MANIFEST_ACCEPT.to_string())];
+        let headers = vec![
+            (
+                "Accept".to_string(),
+                media_types::application_vnd_oci_image_manifest_v1_json(),
+            ),
+            (
+                "Accept".to_string(),
+                media_types::application_vnd_oci_image_index_v1_json(),
+            ),
+        ];
 
         // the same manifest `get-manifest` gets for the tag
         let bytes = Transport::fetch(url, headers, None)
@@ -128,7 +136,16 @@ impl Guest for OCIClient {
     #[allow(async_fn_in_trait)]
     async fn get_manifest(reference: Reference) -> Result<Manifest, ErrorCode> {
         let (url, digest) = Self::manifest_url(reference);
-        let headers = vec![("Accept".to_string(), MANIFEST_ACCEPT.to_string())];
+        let headers = vec![
+            (
+                "Accept".to_string(),
+                media_types::application_vnd_oci_image_manifest_v1_json(),
+            ),
+            (
+                "Accept".to_string(),
+                media_types::application_vnd_oci_image_index_v1_json(),
+            ),
+        ];
         // a manifest requested by tag has no digest to verify
         let raw = Transport::fetch(url, headers, digest)
             .await?
@@ -317,67 +334,17 @@ impl OCIClient {
         })
     }
 
-    fn normalize_media_type(media_type: &str) -> MediaType {
-        match media_type {
-            "application/vnd.oci.descriptor.v1+json" => {
-                MediaType::ApplicationVndOciDescriptorV1(MediaTypeSuffix::Json)
-            }
-            "application/vnd.oci.layout.header.v1+json" => {
-                MediaType::ApplicationVndOciLayoutHeaderV1(MediaTypeSuffix::Json)
-            }
-            "application/vnd.oci.image.index.v1+json" => {
-                MediaType::ApplicationVndOciImageIndexV1(MediaTypeSuffix::Json)
-            }
-            "application/vnd.oci.image.manifest.v1+json" => {
-                MediaType::ApplicationVndOciImageManifestV1(MediaTypeSuffix::Json)
-            }
-            "application/vnd.oci.image.config.v1+json`" => {
-                MediaType::ApplicationVndOciImageConfigV1(MediaTypeSuffix::Json)
-            }
-            "application/vnd.oci.image.layer.v1.tar" => {
-                MediaType::ApplicationVndOciImageLayerV1Tar(MediaTypeSuffix::Other(None))
-            }
-            "application/vnd.oci.image.layer.v1.tar+gzip" => {
-                MediaType::ApplicationVndOciImageLayerV1Tar(MediaTypeSuffix::Gzip)
-            }
-            "application/vnd.oci.image.layer.v1.tar+zstd" => {
-                MediaType::ApplicationVndOciImageLayerV1Tar(MediaTypeSuffix::Zstd)
-            }
-            "application/vnd.oci.image.layer.nondistributable.v1.tar" => {
-                MediaType::ApplicationVndOciImageLayerNondistributableV1Tar(MediaTypeSuffix::Other(
-                    None,
-                ))
-            }
-            "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip" => {
-                MediaType::ApplicationVndOciImageLayerNondistributableV1Tar(MediaTypeSuffix::Gzip)
-            }
-            "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd" => {
-                MediaType::ApplicationVndOciImageLayerNondistributableV1Tar(MediaTypeSuffix::Zstd)
-            }
-            "application/vnd.oci.empty.v1+json" => {
-                MediaType::ApplicationVndOciEmptyV1(MediaTypeSuffix::Json)
-            }
-            "application/vnd.wasm.config.v0+json" => {
-                MediaType::ApplicationVndWasmConfigV0(MediaTypeSuffix::Json)
-            }
-            "application/wasm" => MediaType::ApplicationWasm,
-            _ => Other(media_type.to_owned()),
-        }
-    }
-
     fn parse_manifest(v: &Value, field: &str) -> Result<Option<Manifest>, ErrorCode> {
         let media_type = Self::required(
             Self::parse_media_type(&v["mediaType"], &format!("{field}.mediaType")),
             "mediaType",
         )?;
-        match media_type {
-            MediaType::ApplicationVndOciImageIndexV1(MediaTypeSuffix::Json) => {
-                Self::parse_oci_image_index_v1(&v, field)
-            }
-            MediaType::ApplicationVndOciImageManifestV1(MediaTypeSuffix::Json) => {
-                Self::parse_oci_image_manifest_v1(&v, field)
-            }
-            _ => Ok(Some(Manifest::Other(serde_json::to_vec(v)?))),
+        if media_type == media_types::application_vnd_oci_image_index_v1_json() {
+            Self::parse_oci_image_index_v1(&v, field)
+        } else if media_type == media_types::application_vnd_oci_image_manifest_v1_json() {
+            Self::parse_oci_image_manifest_v1(&v, field)
+        } else {
+            Ok(Some(Manifest::Other(serde_json::to_vec(v)?)))
         }
     }
 
@@ -554,14 +521,12 @@ impl OCIClient {
                 .map(|mt| mt.or(default_media_type)),
             &format!("{field}.mediaType"),
         )?;
-        match media_type {
-            MediaType::ApplicationVndOciImageConfigV1(MediaTypeSuffix::Json) => {
-                Self::parse_oci_image_config_v1(&v, field)
-            }
-            MediaType::ApplicationVndWasmConfigV0(MediaTypeSuffix::Json) => {
-                Self::parse_wasm_config_v0(&v, field)
-            }
-            _ => Ok(Some(Config::Other(serde_json::to_vec(v)?))),
+        if media_type == media_types::application_vnd_oci_image_config_v1_json() {
+            Self::parse_oci_image_config_v1(&v, field)
+        } else if media_type == media_types::application_vnd_wasm_config_v0_json() {
+            Self::parse_wasm_config_v0(&v, field)
+        } else {
+            Ok(Some(Config::Other(serde_json::to_vec(v)?)))
         }
     }
 
@@ -812,7 +777,7 @@ impl OCIClient {
     }
 
     fn parse_media_type(v: &Value, field: &str) -> Result<Option<MediaType>, ErrorCode> {
-        Ok(Self::parse_string(v, field)?.map(|v| Self::normalize_media_type(&v)))
+        Self::parse_string(v, field)
     }
 
     fn parse_instant(v: &Value, field: &str) -> Result<Option<Instant>, ErrorCode> {
@@ -1352,64 +1317,6 @@ impl PartialEq for Instant {
     }
 }
 
-impl PartialEq for MediaType {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                MediaType::ApplicationVndOciDescriptorV1(this),
-                MediaType::ApplicationVndOciDescriptorV1(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciLayoutHeaderV1(this),
-                MediaType::ApplicationVndOciLayoutHeaderV1(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciImageIndexV1(this),
-                MediaType::ApplicationVndOciImageIndexV1(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciImageManifestV1(this),
-                MediaType::ApplicationVndOciImageManifestV1(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciImageConfigV1(this),
-                MediaType::ApplicationVndOciImageConfigV1(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciImageLayerV1Tar(this),
-                MediaType::ApplicationVndOciImageLayerV1Tar(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciEmptyV1(this),
-                MediaType::ApplicationVndOciEmptyV1(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndOciImageLayerNondistributableV1Tar(this),
-                MediaType::ApplicationVndOciImageLayerNondistributableV1Tar(other),
-            ) => this == other,
-            (
-                MediaType::ApplicationVndWasmConfigV0(this),
-                MediaType::ApplicationVndWasmConfigV0(other),
-            ) => this == other,
-            (MediaType::ApplicationWasm, MediaType::ApplicationWasm) => true,
-            (Other(this), Other(other)) => this == other,
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq for MediaTypeSuffix {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (MediaTypeSuffix::Json, MediaTypeSuffix::Json) => true,
-            (MediaTypeSuffix::Gzip, MediaTypeSuffix::Gzip) => true,
-            (MediaTypeSuffix::Zstd, MediaTypeSuffix::Zstd) => true,
-            (MediaTypeSuffix::Other(this), MediaTypeSuffix::Other(other)) => this == other,
-            _ => false,
-        }
-    }
-}
-
 impl PartialEq for Manifest {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1564,6 +1471,27 @@ wit_bindgen::generate!({
 });
 
 export!(OCIClient);
+
+/// The values of the imported `media-types` used by the client, unit tests run natively without
+/// a component to import them from.
+#[cfg(test)]
+mod media_types {
+    pub fn application_vnd_oci_image_index_v1_json() -> String {
+        "application/vnd.oci.image.index.v1+json".to_string()
+    }
+    pub fn application_vnd_oci_image_manifest_v1_json() -> String {
+        "application/vnd.oci.image.manifest.v1+json".to_string()
+    }
+    pub fn application_vnd_oci_image_config_v1_json() -> String {
+        "application/vnd.oci.image.config.v1+json".to_string()
+    }
+    pub fn application_vnd_wasm_config_v0_json() -> String {
+        "application/vnd.wasm.config.v0+json".to_string()
+    }
+    pub fn application_wasm() -> String {
+        "application/wasm".to_string()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1955,7 +1883,7 @@ mod tests {
                 config: OciDescriptorV1 {
                     annotations: None,
                     digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "80d83bbdaa82cff96584c99217c29fd17bc7e5f0424c0cb26aa3831ea18132b4".to_string() },
-                    media_type: MediaType::ApplicationVndWasmConfigV0(MediaTypeSuffix::Json),
+                    media_type: media_types::application_vnd_wasm_config_v0_json(),
                     size: 345,
                     urls: None,
                     artifact_type: None,
@@ -1966,13 +1894,13 @@ mod tests {
                         ("org.opencontainers.image.title".to_string(), "client.wasm".to_string()),
                     ])),
                     digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "ee7ff5c9588e997b4a54b6d351b52a5ca4f6980377f59e48c778f48a23b483db".to_string() },
-                    media_type: MediaType::ApplicationWasm,
+                    media_type: media_types::application_wasm(),
                     size: 1894585,
                     urls: None,
                     artifact_type: None,
                     data: None,
                  }],
-                media_type: MediaType::ApplicationVndOciImageManifestV1(MediaTypeSuffix::Json),
+                media_type: media_types::application_vnd_oci_image_manifest_v1_json(),
                 schema_version: Some(2 as u8),
                 subject: None,
             })),
@@ -2007,12 +1935,12 @@ mod tests {
             }), "").unwrap(),
             Some(Manifest::OciImageIndexV1(OciImageIndexManifestV1 {
                 schema_version: Some(2 as u8),
-                media_type: MediaType::ApplicationVndOciImageIndexV1(MediaTypeSuffix::Json),
+                media_type: media_types::application_vnd_oci_image_index_v1_json(),
                 artifact_type: None,
                 manifests: vec![
                     OciImageIndexManifestV1Manifest{
                         annotations:None,
-                        media_type:MediaType::Other("application/vnd.docker.distribution.manifest.v2+json".to_string()),
+                        media_type: MediaType::from("application/vnd.docker.distribution.manifest.v2+json"),
                         size:743,
                         platform:Some(OciImageIndexManifestV1ManifestPlatform{
                             architecture:"amd64".to_string(),
@@ -2025,11 +1953,11 @@ mod tests {
                         digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "9434033b4008b51c0c9270dda9315ea4229901fee28a7980085091e9fd4b62b8".to_string() },
                         urls: None,
                         data: None,
-                        artifact_type: Some(MediaType::Other("application/vnd.docker.container.image.v1+json".to_string()))
+                        artifact_type: Some(MediaType::from("application/vnd.docker.container.image.v1+json")),
                     },
                     OciImageIndexManifestV1Manifest{
                         annotations:None,
-                        media_type:MediaType::Other("application/vnd.docker.distribution.manifest.v2+json".to_string()),
+                        media_type: MediaType::from("application/vnd.docker.distribution.manifest.v2+json"),
                         size:743,
                         platform:Some(OciImageIndexManifestV1ManifestPlatform{
                             architecture:"arm64".to_string(),
@@ -2040,7 +1968,7 @@ mod tests {
                         digest: Digest { algorithm: DigestAlgorithm::Sha256, encoded: "eac7a2bcae76b2bc5b5fed23033ffba56283462e315c2035b6ab5b2c8c80bd34".to_string() },
                         urls: None,
                         data: None,
-                        artifact_type: Some(MediaType::Other("application/vnd.docker.container.image.v1+json".to_string())),
+                        artifact_type: Some(MediaType::from("application/vnd.docker.container.image.v1+json")),
                     },
                 ],
                 subject: None,
@@ -2104,7 +2032,7 @@ mod tests {
                     },
                     "User": "65532"
                 }
-            }), "", Some(MediaType::ApplicationVndOciImageConfigV1(MediaTypeSuffix::Json))).unwrap(),
+            }), "", Some(media_types::application_vnd_oci_image_config_v1_json())).unwrap(),
             Some(Config::OciImageV1(OciImageConfigV1 {
                 architecture: "amd64".to_string(),
                 author: Some("github.com/ko-build/ko".to_string()),
@@ -2194,7 +2122,7 @@ mod tests {
                     }
                 }),
                 "",
-                Some(MediaType::ApplicationVndWasmConfigV0(MediaTypeSuffix::Json))
+                Some(media_types::application_vnd_wasm_config_v0_json())
             )
             .unwrap(),
             Some(Config::WasmV0(WasmConfigV0 {

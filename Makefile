@@ -163,7 +163,7 @@ SIGN ?= true
 PUBLISH_LOG ?=
 
 # the files that can be published, e.g. client.wasm, published from target/components/client/client.wasm
-PUBLISH_FILES := interface.wasm $(foreach component,$(filter-out dep-% test-%,$(COMPONENTS)),$(component).wasm $(component).debug.wasm)
+PUBLISH_FILES := interface.wasm $(foreach component,$(filter-out dep-% internal-% test-%,$(COMPONENTS)),$(component).wasm $(component).debug.wasm)
 
 .PHONY: publish ## Publish each component in the target/components directory
 publish: $(addprefix publish-,$(PUBLISH_FILES))
