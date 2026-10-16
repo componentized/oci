@@ -12,7 +12,7 @@ export PATH := $(abspath $(TOOLS_DIR))/bin:$(PATH)
 CARGO_INSTALL := $(if $(shell command -v cargo-binstall 2> /dev/null),cargo binstall --no-confirm --disable-telemetry,cargo install)
 
 COMPONENTS = $(sort $(foreach file,$(wildcard $(addprefix components/*/,wit/*.constants.wit *.properties *.wac *.wkg Cargo.toml)),$(word 2,$(subst /, ,$(file)))))
-TOOLS := componentized-constants-cli static-config wac-cli wasm-tools wasmtime-cli wkg
+TOOLS := componentized-constants-cli componentized-static-config-cli wac-cli wasm-tools wasmtime-cli wkg
 
 export WKG_CONFIG_FILE := $(abspath .config/wasm-pkg/config.toml)
 
@@ -84,10 +84,10 @@ ${COMPONENTS_DIR}/$1/$1.debug.wasm: components/$1/wit/deps ${COMPONENTS_DIR}/$1/
 
 else ifneq ($(wildcard components/$1/$1.properties),)
 
-${COMPONENTS_DIR}/$1/$1.wasm: components/$1/$1.properties ${COMPONENTS_DIR}/$1/README.md | $(call tool,static-config)
+${COMPONENTS_DIR}/$1/$1.wasm: components/$1/$1.properties ${COMPONENTS_DIR}/$1/README.md | $(call tool,componentized-static-config-cli)
 	static-config -f components/$1/$1.properties -o ${COMPONENTS_DIR}/$1/$1.wasm
 
-${COMPONENTS_DIR}/$1/$1.debug.wasm: components/$1/$1.properties ${COMPONENTS_DIR}/$1/README.md | $(call tool,static-config)
+${COMPONENTS_DIR}/$1/$1.debug.wasm: components/$1/$1.properties ${COMPONENTS_DIR}/$1/README.md | $(call tool,componentized-static-config-cli)
 	static-config -f components/$1/$1.properties -o ${COMPONENTS_DIR}/$1/$1.debug.wasm
 
 else ifneq ($(wildcard components/$1/$1.wac),)
