@@ -4,3 +4,6 @@
 /tools/Cargo.lock
 # wit dependencies, fetched by `make wit` from the wkg.toml and wkg.lock files
 **/wit/deps/
+
+# a lock wkg rewrote, kept while `make` checks whether its content changed
+wkg.lock.orig

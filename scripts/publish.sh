@@ -21,8 +21,8 @@
 # COMPONENTS_DIR     the directory the components are built into, defaults to target/components
 # SIGN               sign the published components with cosign, `false` to push without signing,
 #                    e.g. to a local registry
-# PUBLISH_LOG        append the published file and its image to this file, e.g.
-#                    `client.wasm ghcr.io/componentized/oci/client:0.1.0@sha256:...`
+# PUBLISH_LOG        append the published file, its size in bytes and its image to this file, e.g.
+#                    `client.wasm 123456 ghcr.io/componentized/oci/client:0.1.0@sha256:...`
 
 set -euo pipefail
 
@@ -101,7 +101,8 @@ digest=$(
 )
 
 if [[ -n "$PUBLISH_LOG" ]]; then
-    echo "${file} ${image}@${digest}" >> "$PUBLISH_LOG"
+    size=$(wc -c < "${COMPONENTS_DIR}/${component_file}" | tr -d ' ')
+    echo "${file} ${size} ${image}@${digest}" >> "$PUBLISH_LOG"
 fi
 
 if [[ "$SIGN" == true ]]; then
