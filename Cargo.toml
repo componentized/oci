@@ -18,3 +18,18 @@ url = "2.5"
 wasmtime = { version = "49", features = ["component-model-async"] }
 wasmtime-wasi = { version = "49", features = ["p3"] }
 wit-bindgen = "0.62.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.component-debug]
+inherits = "dev"
+opt-level = 1        # most of the size win; locals mostly still visible
+lto = true
+codegen-units = 1
+incremental = false  # no benefit with one codegen unit
+debug = "full"       # variables and types for lldb, file:line in backtraces
+# kept from dev: debug-assertions, overflow-checks, no strip

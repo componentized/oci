@@ -104,15 +104,16 @@ jobs:
           REPOSITORY: "ghcr.io/${{ github.repository }}"
           VERSION: "${{ case(github.ref == 'refs/heads/main', steps.interface_version.outputs.VERSION, steps.tag_version.outputs.VERSION) }}"
       - name: Draft release notes
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || (github.ref == 'refs/heads/main' && contains(steps.interface_version.outputs.VERSION, '-'))
         run: |
           {
             echo "## Published components"
             echo
-            echo "| File | Image |"
-            echo "| --- | --- |"
-            while read -r file image ; do
-              echo "| \`${file}\` | \`${image}\` |"
+            echo "| File | Size | Image |"
+            echo "| --- | --: | --- |"
+            while read -r file bytes image ; do
+              size=$( numfmt --to=iec-i --suffix=B --format=%.1f "${bytes}" )
+              echo "| \`${file}\` | ${size} | \`${image}\` |"
             done < "${RUNNER_TEMP}/published.txt"
           } > "${RUNNER_TEMP}/release-notes.md"
           cat "${RUNNER_TEMP}/release-notes.md"
