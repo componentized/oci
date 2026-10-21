@@ -22,7 +22,7 @@ wkg = cp -p $(1)/wkg.lock $(1)/wkg.lock.orig && \
 clean-wit:
 	rm -rf $(WIT_DEPS)
 
-.PHONY: wit
+.PHONY: wit ## Fetch the wit dependencies of each wkg.toml into its wit/deps
 wit: $(WIT_DEPS)
 
 define FETCH_WIT
