@@ -4,10 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: The new version of the interface package, e.g. 0.1.0 or 0.2.0-dev
+        description: The new version of the interface package and crates, e.g. 0.1.0 or 0.2.0-dev
         required: true
         type: string
-        default: "0.1.1-dev" # the current version, kept current by scripts/bump-version.sh
+        # the repository's own version, carried forward by build/scripts/update-build.sh, and ignored
+        # by build/scripts/check-build.sh
+        default: "0.1.1-dev" # the current version, kept current by build/scripts/bump-version.sh
 
 jobs:
   # bumps the version with read only access, the changes are handed to the push job as a patch so
@@ -16,11 +18,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      current: ${{ steps.version.outputs.current }}
+      version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Check version
+        id: version
         # a semver version without a leading `v`, the tag adds it. Build metadata is used to tag the
         # debug builds of components, e.g. 0.1.0+debug, and isn't allowed in the version itself.
         run: |
+          # the checkout is before the bump, the wit package's version is the current version
+          current=$( sed -n "s/^package ${GITHUB_REPOSITORY/\//:}@\(.*\);$/\1/p" wit/worlds.wit )
           identifier='(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)'
           semver="^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${identifier}(\.${identifier})*)?$"
           if ! [[ "${VERSION}" =~ ${semver} ]] ; then
@@ -31,11 +42,11 @@ jobs:
             echo "::error::the version '${VERSION}' must not contain build metadata"
             exit 1
           fi
+          echo "bumping ${current} to ${VERSION}"
+          echo "current=${current}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
         env:
           VERSION: ${{ inputs.version }}
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@main
@@ -45,9 +56,9 @@ jobs:
           make -s tools-path >> "${GITHUB_PATH}"
       - name: Bump version
         # also fetches the wit dependencies for the new version, and builds and tests the components
-        run: scripts/bump-version.sh "${VERSION}"
+        run: build/scripts/bump-version.sh "${VERSION}"
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
       - name: Collect changes
         run: |
           git add --all
@@ -75,7 +86,8 @@ jobs:
     permissions:
       contents: read
     env:
-      VERSION: ${{ inputs.version }}
+      CURRENT_VERSION: ${{ needs.bump.outputs.current }}
+      VERSION: ${{ needs.bump.outputs.version }}
     steps:
       - name: Check custodian app credentials
         run: |
@@ -95,7 +107,7 @@ jobs:
           # only this repository, with only the permissions the bump needs
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
-          # the bump changes the default version in this workflow
+          # the bump may change a workflow file, e.g. a reference to the package
           permission-workflows: write
           # a release runs this workflow again, to bump to the next dev version
           permission-actions: write
@@ -107,14 +119,8 @@ jobs:
         with:
           name: bump-version.patch
           path: ${{ runner.temp }}
-      - name: Read current version
-        # the checkout is before the bump, the wit package's version is the current version
-        run: |
-          current=$( sed -n 's/^package componentized:oci@\(.*\);$/\1/p' wit/worlds.wit )
-          echo "CURRENT_VERSION=${current}" >> "${GITHUB_ENV}"
       - name: Commit changes
-        # the commit is created with the REST API, as the app's token can't push. The patch is applied
-        # locally only to find the changed files and their modes.
+        # the commit is created with the REST API, as the app's token can't push
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
@@ -122,48 +128,7 @@ jobs:
           api="repos/${GITHUB_REPOSITORY}"
           base=$( git rev-parse HEAD )
           git apply --index "${RUNNER_TEMP}/bump-version.patch"
-
-          # a blob for each changed file, or a null sha for a deleted file
-          entries="${RUNNER_TEMP}/tree-entries.json"
-          echo '[]' > "${entries}"
-          git diff --cached --no-renames --name-status "${base}" | while IFS=$'\t' read -r status path ; do
-            if [ "${status}" = "D" ] ; then
-              entry=$( jq -n --arg path "${path}" '{path: $path, mode: "100644", type: "blob", sha: null}' )
-            else
-              mode=$( git ls-files --stage -- "${path}" | cut -d' ' -f1 )
-              sha=$( base64 < "${path}" | tr -d '\n' | jq -Rs '{encoding: "base64", content: .}' | gh api --method POST "${api}/git/blobs" --input - --jq .sha )
-              entry=$( jq -n --arg path "${path}" --arg mode "${mode}" --arg sha "${sha}" '{path: $path, mode: $mode, type: "blob", sha: $sha}' )
-            fi
-            jq --argjson entry "${entry}" '. + [$entry]' "${entries}" > "${entries}.tmp" && mv "${entries}.tmp" "${entries}"
-            echo "${status} ${path}"
-          done
-          tree=$( jq --arg base "$( git rev-parse "${base}^{tree}" )" '{base_tree: $base, tree: .}' "${entries}" | gh api --method POST "${api}/git/trees" --input - --jq .sha )
-
-          # authored, committed and signed off (DCO) by the custodian app's bot. GitHub only signs
-          # commits it attributes entirely to the app, so the author and committer are left for GitHub
-          # to fill in. The user who triggered the workflow is credited as a co-author, with their
-          # GitHub noreply email so their email address isn't exposed. A run started by the app after a
-          # release has no one else to credit.
-          bot="${APP_SLUG}[bot]"
-          bot_email="$( gh api "users/${bot}" --jq .id )+${bot}@users.noreply.github.com"
-          message=$( printf 'Bump version from %s to %s\n\nSigned-off-by: %s <%s>' "${CURRENT_VERSION}" "${VERSION}" "${bot}" "${bot_email}" )
-          if [ "${GITHUB_ACTOR}" != "${bot}" ] ; then
-            name=$( gh api "users/${GITHUB_ACTOR}" --jq '.name // .login' )
-            name="${name:-${GITHUB_ACTOR}}"
-            email="${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
-            message=$( printf '%s\nCo-authored-by: %s <%s>' "${message}" "${name}" "${email}" )
-          fi
-          read -r commit verified < <( jq -n \
-            --arg message "${message}" \
-            --arg tree "${tree}" --arg parent "${base}" \
-            '{message: $message, tree: $tree, parents: [$parent]}' \
-            | gh api --method POST "${api}/git/commits" --input - --jq '"\(.sha) \(.verification.verified)"' )
-          echo "created commit ${commit}"
-          # the branch requires signed commits, fail before pushing rather than after
-          if [ "${verified}" != "true" ] ; then
-            echo "::error::the commit '${commit}' was not created, or was not signed by GitHub"
-            exit 1
-          fi
+          commit=$( build/scripts/create-commit.sh "${base}" "Bump version from ${CURRENT_VERSION} to ${VERSION}" )
 
           # a release, rather than a pre-release, is tagged, e.g. v0.1.0. Tags are immutable, check the
           # tag is free before pushing the branch, so a release isn't left without its tag
@@ -191,9 +156,9 @@ jobs:
             echo "tagged ${commit} as ${tag}"
           fi
       - name: Bump to the next dev version
-        # after a release, the branch moves on to a pre-release of the next patch version, e.g. 0.1.0
-        # is followed by 0.1.1-dev. Run with the app's token, the GITHUB_TOKEN can't start workflows.
-        if: ${{ !contains(inputs.version, '-') }}
+        # after a release, the branch moves on to a pre-release of the next patch version, e.g. 0.3.0
+        # is followed by 0.3.1-dev. Run with the app's token, the GITHUB_TOKEN can't start workflows.
+        if: ${{ !contains(needs.bump.outputs.version, '-') }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |

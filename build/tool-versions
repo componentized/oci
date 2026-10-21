@@ -1,0 +1,6 @@
+# the lowest version of each tool the build works with, `make update-build` raises a tool pinned in
+# tools/Cargo.toml to this version when it is pinned to an older one. A tool missing from
+# tools/Cargo.toml is left out, the build only needs it for the components that use it.
+#
+# <tool> <version>
+wac-cli 0.12.0
