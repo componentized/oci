@@ -27,7 +27,7 @@ componentized-constants-cli = "=0.1.1"
 componentized-static-config-cli = "=0.3.0"
 wac-cli = "=0.12.0"
 wasm-tools = "=1.262.0"
-wasmtime-cli = "=49.0.3"
+wasmtime-cli = "=49.0.4"
 wkg = "=0.16.1"
 
 # not a member of the repository's workspace
