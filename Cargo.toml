@@ -16,7 +16,7 @@ test-harness = { path = "./crates/test-harness" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 url = "2.5"
 wasmtime = { version = "49", features = ["component-model-async"] }
-wasmtime-wasi = { version = "49", features = ["p3"] }
+wasmtime-wasi = { version = "50", features = ["p3"] }
 wit-bindgen = "0.63.0"
 
 [profile.release]
