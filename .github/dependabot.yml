@@ -1,22 +1,27 @@
 version: 2
 updates:
-- package-ecosystem: github-actions
-  directory: "/"
-  schedule:
-    interval: daily
-- package-ecosystem: cargo
-  directory: "/"
-  schedule:
-    interval: daily
-- package-ecosystem: cargo
-  directory: "/tools"
-  schedule:
-    interval: daily
-- package-ecosystem: rust-toolchain
-  directory: "/"
-  schedule:
-    interval: daily
-- package-ecosystem: devcontainers
-  directory: "/"
-  schedule:
-    interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: daily
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: daily
+    groups:
+      wasmtime:
+        patterns:
+          - "wasmtime"
+          - "wasmtime-*"
+  - package-ecosystem: cargo
+    directory: "/tools"
+    schedule:
+      interval: daily
+  - package-ecosystem: rust-toolchain
+    directory: "/"
+    schedule:
+      interval: daily
+  - package-ecosystem: devcontainers
+    directory: "/"
+    schedule:
+      interval: weekly
