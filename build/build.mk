@@ -18,8 +18,21 @@ export WKG_CONFIG_FILE := $(abspath .config/wasm-pkg/config.toml)
 .DEFAULT_GOAL := all
 
 # the rust target components are built for, `wasm32-wasip3` builds components that run std threads on
-# component model cooperative threads, see build/components.mk
+# component model cooperative threads, see build/components.mk. A component built with cargo may name
+# its own in its Cargo.toml, `COMPONENT_TARGET` given on the command line overrides it, e.g.
+#
+#   [package.metadata.componentized]
+#   target = "wasm32-wasip3"
 COMPONENT_TARGET ?= wasm32-unknown-unknown
+
+# read once while parsing, defines COMPONENT_TARGET_<component> for those that name one
+$(foreach file,$(wildcard components/*/Cargo.toml),$(eval COMPONENT_TARGET_$(word 2,$(subst /, ,$(file))) := $(shell sed -n '/^\[package\.metadata\.componentized\]/,/^\[/s/^target *= *"\(.*\)"/\1/p' $(file))))
+
+# the rust target a component is built for, e.g. `$(call component_target,trace)`
+component_target = $(if $(filter command line,$(origin COMPONENT_TARGET)),$(COMPONENT_TARGET),$(or $(COMPONENT_TARGET_$(1)),$(COMPONENT_TARGET)))
+
+# the targets the components built with cargo are built for
+COMPONENT_TARGETS = $(sort $(foreach file,$(wildcard components/*/Cargo.toml),$(call component_target,$(word 2,$(subst /, ,$(file))))))
 
 # the cli built from this repository, e.g. `constants`, released with an archive for each platform by
 # the CI workflow. Empty for a repository without a cli.

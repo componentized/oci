@@ -96,7 +96,7 @@ endef
 
 $(foreach name,$(LOCAL_TOOLS),$(eval $(call INSTALL_LOCAL_TOOL,$(name))))
 
-ifeq ($(COMPONENT_TARGET),wasm32-wasip3)
+ifneq ($(filter wasm32-wasip3,$(COMPONENT_TARGETS)),)
 
 # wasi-sdk, for its experimental sysroot with a wasi-libc built for component model cooperative
 # threads, see build/components.mk. Installed with the tools, set WASI_SDK_PATH to use an existing install.
@@ -113,5 +113,88 @@ $(WASI_SDK):
 	@set -o pipefail; curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$(basename $(WASI_SDK_VERSION))/wasi-sdk-$(WASI_SDK_VERSION)-$(WASI_SDK_HOST).tar.gz | tar xz --strip-components 1 -C $(WASI_SDK_DIR)
 	@rm -f $(@D)/wasi-sdk@*
 	@touch $@
+
+# a wasi-libc commit built for component model cooperative threads, in place of wasi-sdk's
+# experimental sysroot, for fixes not yet in a wasi-sdk release, e.g. `WASI_LIBC_VERSION :=
+# f6e9006376e6f8e8f91ab84fc956be4e345588bc` for WebAssembly/wasi-libc#884. Empty uses wasi-sdk's.
+WASI_LIBC_VERSION ?=
+# the WASI 0.3 version the wasi-libc built from WASI_LIBC_VERSION imports, in place of the one it's
+# generated for, e.g. `0.3.0` to match the WIT of the components. The WIT of the patch releases of
+# WASI 0.3 is the same but for docs, only the versions in the generated bindings are replaced.
+# Empty keeps wasi-libc's.
+WASI_LIBC_WASI_VERSION ?=
+
+ifeq ($(WASI_LIBC_VERSION),)
+
+WASI_SYSROOT := $(WASI_SDK_PATH)/share/wasi-sysroot/experimental-coop-threads
+WASI_LIBC :=
+
+else
+
+WASI_LIBC_BUILD := $(WASI_LIBC_VERSION)$(if $(WASI_LIBC_WASI_VERSION),-wasi-$(WASI_LIBC_WASI_VERSION))
+WASI_SYSROOT := $(abspath $(TOOLS_DIR))/wasi-libc-$(WASI_LIBC_BUILD)
+WASI_LIBC := $(TOOLS_DIR)/.installed/wasi-libc@$(WASI_LIBC_BUILD)
+
+# the bindings wasi-libc generates for WASI 0.3 from its WIT, checked in, and the version they're
+# generated for
+WASI_LIBC_WASIP3_BINDINGS := libc-bottom-half/headers/public/wasi/__generated_wasip3.h libc-bottom-half/sources/wasip3.c libc-bottom-half/sources/wasip3_component_type.o libc-bottom-half/crt/crt1-command.c
+wasi_libc_wasip3_version = $$(sed -n 's/^set(wasip3-version \(.*\))$$/\1/p' $(1)/CMakeLists.txt)
+
+# cmake and ninja build wasi-libc, installed with the tools
+CMAKE_VERSION := 4.4.4
+CMAKE_HOST := $(or $(word 2,$(subst :, ,$(filter $(shell rustc --print host-tuple):%,aarch64-apple-darwin:macos-universal x86_64-apple-darwin:macos-universal aarch64-unknown-linux-gnu:linux-aarch64 x86_64-unknown-linux-gnu:linux-x86_64))),unsupported-host)
+CMAKE_DIR := $(abspath $(TOOLS_DIR))/cmake-$(CMAKE_VERSION)
+# the macos archive holds an app bundle
+CMAKE := $(CMAKE_DIR)/$(if $(filter macos-%,$(CMAKE_HOST)),CMake.app/Contents/)bin/cmake
+CMAKE_INSTALLED := $(TOOLS_DIR)/.installed/cmake@$(CMAKE_VERSION)
+
+NINJA_VERSION := 1.13.2
+NINJA_HOST := $(or $(word 2,$(subst :, ,$(filter $(shell rustc --print host-tuple):%,aarch64-apple-darwin:mac x86_64-apple-darwin:mac aarch64-unknown-linux-gnu:linux-aarch64 x86_64-unknown-linux-gnu:linux))),unsupported-host)
+NINJA_DIR := $(abspath $(TOOLS_DIR))/ninja-$(NINJA_VERSION)
+NINJA := $(NINJA_DIR)/ninja
+NINJA_INSTALLED := $(TOOLS_DIR)/.installed/ninja@$(NINJA_VERSION)
+
+tools: $(WASI_LIBC)
+
+$(CMAKE_INSTALLED):
+	@rm -rf $(CMAKE_DIR)
+	@mkdir -p $(CMAKE_DIR) $(@D)
+	@set -o pipefail; curl -fsSL https://github.com/Kitware/CMake/releases/download/v$(CMAKE_VERSION)/cmake-$(CMAKE_VERSION)-$(CMAKE_HOST).tar.gz | tar xz --strip-components 1 -C $(CMAKE_DIR)
+	@rm -f $(@D)/cmake@*
+	@touch $@
+
+$(NINJA_INSTALLED):
+	@rm -rf $(NINJA_DIR)
+	@mkdir -p $(NINJA_DIR) $(@D)
+	@curl -fsSL https://github.com/ninja-build/ninja/releases/download/v$(NINJA_VERSION)/ninja-$(NINJA_HOST).zip -o $(NINJA_DIR)/ninja.zip
+	@unzip -q -o $(NINJA_DIR)/ninja.zip -d $(NINJA_DIR)
+	@rm $(NINJA_DIR)/ninja.zip
+	@rm -f $(@D)/ninja@*
+	@touch $@
+
+# built with wasi-sdk's clang, static libraries only, rust links libc statically and wasi-sdk's
+# compiler-rt builtins, which a shared libc links, aren't built for cooperative threads
+$(WASI_LIBC): | $(WASI_SDK) $(CMAKE_INSTALLED) $(NINJA_INSTALLED)
+	@rm -rf $(WASI_SYSROOT) $(WASI_SYSROOT)-src
+	@mkdir -p $(WASI_SYSROOT)-src $(@D)
+	@set -o pipefail; curl -fsSL https://github.com/WebAssembly/wasi-libc/archive/$(WASI_LIBC_VERSION).tar.gz | tar xz --strip-components 1 -C $(WASI_SYSROOT)-src
+ifneq ($(WASI_LIBC_WASI_VERSION),)
+	@# the type section of the bindings is binary, a version of the same length keeps it valid
+	@from=$(call wasi_libc_wasip3_version,$(WASI_SYSROOT)-src); to=$(WASI_LIBC_WASI_VERSION); \
+		if [ -z "$$from" ] || [ $${#from} -ne $${#to} ]; then echo "can't replace WASI $$from of wasi-libc with $$to" >&2; exit 1; fi; \
+		cd $(WASI_SYSROOT)-src && perl -0777 -pi -e "s/\@\Q$$from\E/\@$$to/g" $(WASI_LIBC_WASIP3_BINDINGS)
+endif
+	$(CMAKE) -S $(WASI_SYSROOT)-src -B $(WASI_SYSROOT)-src/build -G Ninja -DCMAKE_MAKE_PROGRAM=$(NINJA) \
+		-DCMAKE_C_COMPILER=$(WASI_SDK_PATH)/bin/clang -DCMAKE_AR=$(WASI_SDK_PATH)/bin/llvm-ar \
+		-DCMAKE_NM=$(WASI_SDK_PATH)/bin/llvm-nm -DCMAKE_RANLIB=$(WASI_SDK_PATH)/bin/llvm-ranlib \
+		-DTARGET_TRIPLE=wasm32-wasip3 -DENABLE_COOP_THREADS=ON -DBUILD_SHARED=OFF \
+		-DBUILTINS_LIB=$$(ls $(WASI_SDK_PATH)/lib/clang/*/lib/wasm32-unknown-wasip3/libclang_rt.builtins.a) \
+		-DCMAKE_INSTALL_PREFIX=$(WASI_SYSROOT)
+	$(NINJA) -C $(WASI_SYSROOT)-src/build install
+	@rm -rf $(WASI_SYSROOT)-src
+	@rm -f $(@D)/wasi-libc@*
+	@touch $@
+
+endif
 
 endif
