@@ -8,8 +8,9 @@
 # build/MANIFEST, copies in the files of the release, listed in its SYNC file, and records the
 # version in build/VERSION and a checksum of each file in build/MANIFEST, checked by
 # build/scripts/check-build.sh. The current version the repository keeps in a synced file, the
-# default of the bump-version workflow, is carried forward. A tool pinned in tools/Cargo.toml to a version older than the
-# release's build/tool-versions requires is raised to that version.
+# default of the bump-version workflow, is carried forward. A tool the repository's tools/Cargo.toml
+# overrides is removed from it once the release's build/tools/Cargo.toml pins the same version or a
+# newer one.
 #
 # <version>         the release to update to, e.g. v0.2.0, the latest release by default
 # BUILD_REPOSITORY  the GitHub repository of the build, defaults to componentized/build
@@ -141,16 +142,20 @@ while read -r path; do
     echo "$(checksum "$path")  ${path}"
 done < "$synced" > build/MANIFEST
 
-# raise the tools pinned to a version older than the build requires, e.g. `wac-cli = "=0.11.0"`
-while read -r tool required; do
-    [[ -z "$tool" || "$tool" == \#* ]] && continue
-    pinned=$(sed -n "s/^${tool} = \"=\(.*\)\"$/\1/p" tools/Cargo.toml 2> /dev/null || true)
-    [[ -z "$pinned" ]] && continue
-    if [[ "$pinned" != "$required" && "$(printf '%s\n%s\n' "$pinned" "$required" | sort -V | head -n 1)" == "$pinned" ]]; then
-        perl -pi -e 's/^(\Q'"${tool}"'\E = "=)[^"]*(")/${1}'"${required}"'${2}/' tools/Cargo.toml
-        echo "updated ${tool} from ${pinned} to ${required} in tools/Cargo.toml, required by the build"
-    fi
-done < build/tool-versions
+# remove the overrides of the tools the build provides that the build has caught up with, pinned to
+# the build's version or an older one, e.g. `wasm-tools = "=1.262.0"` when the build pins 1.263.0. A
+# newer version stays, the repository is ahead of the build. The tool's dependency and its line in
+# [package.metadata.bins] both start with its name, e.g. `wasm-tools = ["wasm-tools"]`.
+if [[ -f tools/Cargo.toml ]]; then
+    while read -r tool provided; do
+        pinned=$(sed -n "s/^${tool} = \"=\(.*\)\"$/\1/p" tools/Cargo.toml)
+        [[ -z "$pinned" ]] && continue
+        if [[ "$(printf '%s\n%s\n' "$pinned" "$provided" | sort -V | tail -n 1)" == "$provided" ]]; then
+            perl -ni -e 'print unless /^\Q'"${tool}"'\E = /' tools/Cargo.toml
+            echo "removed ${tool} ${pinned} from tools/Cargo.toml, the build provides ${provided}"
+        fi
+    done < <(sed -n 's/^\([A-Za-z0-9_-]*\) = "=\(.*\)"$/\1 \2/p' build/tools/Cargo.toml)
+fi
 
 echo "updated the build to ${BUILD_REPOSITORY} ${version}"
 exit
