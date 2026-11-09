@@ -5,6 +5,7 @@ on:
     branches:
       - "**"
       - "!dependabot/**"
+      - "!update-build/**"
     tags:
       - 'v[0-9]+\.[0-9]+\.[0-9]+-?**'
   pull_request: {}
@@ -33,7 +34,7 @@ jobs:
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@main
       - name: Install tools
-        # the versions pinned in tools/Cargo.toml, on the path for later steps
+        # the versions pinned in build/tools/Cargo.toml and tools/Cargo.toml, on the path for later steps
         run: |
           make tools
           make -s tools-path >> "${GITHUB_PATH}"

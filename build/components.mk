@@ -37,9 +37,9 @@ endif
 # turn the core module cargo built into a component
 componentize = $(WASM_TOOLS) component new $(1) -o $(2)
 
-# the release build of a component is optimized again for size with wasm-opt when it is pinned in
-# tools/Cargo.toml, `COMPONENT_OPTIMIZE=` builds without.
-COMPONENT_OPTIMIZE ?= $(filter wasm-opt,$(TOOLS))
+# the release build of a component is optimized again for size with wasm-opt when set, e.g.
+# `COMPONENT_OPTIMIZE := true`, the build provides wasm-opt to every repository
+COMPONENT_OPTIMIZE ?=
 
 # the wasm features rust enables for wasm32-unknown-unknown and wasm32-wasip3, `rustc --print cfg
 # --target wasm32-unknown-unknown`. The stripped modules don't say which features they use, wasm-opt

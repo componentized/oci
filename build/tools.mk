@@ -4,18 +4,28 @@ TOOLS_BIN := $(abspath $(TOOLS_DIR))/bin
 # for the scripts and tests the recipes run, they look up the tools on the PATH
 export PATH := $(TOOLS_BIN):$(PATH)
 
-# the tools pinned in tools/Cargo.toml, generated when it changes, make restarts after generating it.
-# Defines TOOLS, TOOLS_PINNED with the version of each tool, e.g. `wkg@0.16.1`, and a variable for
-# each binary a tool installs, e.g. `WKG := $(TOOLS_BIN)/wkg`. Recipes run the pinned tools by path,
-# make 3.81 runs a simple command without a shell and looks it up on its own PATH, before the export
-# above, which would find a tool already on the system.
+# the tools the build provides, pinned in build/tools/Cargo.toml, and those the repository pins in
+# its own tools/Cargo.toml, optional: a tool it pins overrides the build's, others it only uses
+# itself. Generated when either changes, make restarts after generating it. Defines TOOLS,
+# TOOLS_PINNED with the version of each tool, e.g. `wkg@0.16.1`, and a variable for each binary a
+# tool installs, e.g. `WKG := $(TOOLS_BIN)/wkg`. Recipes run the pinned tools by path, make 3.81 runs
+# a simple command without a shell and looks it up on its own PATH, before the export above, which
+# would find a tool already on the system. A binary set on the command line is run in its place,
+# e.g. `make WKG=../wkg/target/release/wkg`.
+TOOLS_MANIFESTS := build/tools/Cargo.toml $(wildcard tools/Cargo.toml)
 TOOLS_MK := target/tools/pinned.mk
 include $(TOOLS_MK)
+# generated again when tools/Cargo.toml is added or removed, it records the manifests it read
+ifneq ($(strip $(TOOLS_MANIFESTS_PINNED)),$(strip $(TOOLS_MANIFESTS)))
+$(TOOLS_MK): tools-manifests-changed
+.PHONY: tools-manifests-changed
+endif
 
-# the tools built from this repository rather than pinned in tools/Cargo.toml, e.g. a cli the
+# the tools built from this repository rather than pinned, e.g. a cli the
 # components are built with, `LOCAL_TOOLS := componentized-constants-cli`. Each is a package of the
 # workspace, installed with the pinned tools, and installed again when its sources change, its own or
-# those of the workspace packages it depends on. A local tool replaces a pinned tool of the same name.
+# those of the workspace packages it depends on. A local tool replaces a pinned tool of the same name,
+# one the build provides too, e.g. componentized/constants builds its own constants cli.
 # Generated when the workspace changes, defines LOCAL_TOOL_PATH_<package>, LOCAL_TOOL_SOURCES_<package>
 # and a variable for each binary the package installs, like the pinned tools, e.g.
 # `CONSTANTS := $(TOOLS_BIN)/constants`.
@@ -37,11 +47,12 @@ CARGO_INSTALL := $(if $(shell command -v cargo-binstall 2> /dev/null),cargo bins
 clean-tools:
 	rm -rf ${TOOLS_DIR}
 
-# each tool is a dependency of the tools package, the binaries it installs are listed in
-# [package.metadata.bins]
-$(TOOLS_MK): tools/Cargo.toml build/pinned.jq
+# each tool is a dependency of a tools package, the binaries it installs are listed in
+# [package.metadata.bins]. The repository's tools/Cargo.toml is read last, overriding the build's.
+$(TOOLS_MK): $(TOOLS_MANIFESTS) build/pinned.jq
 	@mkdir -p $(@D)
-	@set -o pipefail; cargo metadata --manifest-path tools/Cargo.toml --no-deps --format-version 1 | jq -r -f build/pinned.jq > $@.tmp
+	@set -o pipefail; for manifest in $(TOOLS_MANIFESTS); do cargo metadata --manifest-path $$manifest --no-deps --format-version 1; done | jq -rs -f build/pinned.jq > $@.tmp
+	@echo "TOOLS_MANIFESTS_PINNED := $(TOOLS_MANIFESTS)" >> $@.tmp
 	@mv $@.tmp $@
 
 # the packages of the workspace, generated again when LOCAL_TOOLS changes. The workspace's members may
@@ -62,7 +73,7 @@ tool = $(TOOLS_DIR)/.installed/$(1)@$(call tool_version,$(1))
 # among the prerequisites, it may be order-only.
 tool_prerequisite = $(if $(filter $(1),$(LOCAL_TOOLS)),$(call tool,$(1)),| $(call tool,$(1)))
 
-.PHONY: tools ## Install the cli tools pinned in tools/Cargo.toml, and those built from the workspace
+.PHONY: tools ## Install the cli tools the build provides, those pinned in tools/Cargo.toml, and those built from the workspace
 tools: $(foreach name,$(sort $(TOOLS) $(LOCAL_TOOLS)),$(call tool,$(name)))
 
 .PHONY: tools-path ## Print the directory of the installed tools for this platform, to add to the PATH
