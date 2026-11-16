@@ -15,7 +15,9 @@
 #   gate.wasm        -> ${REPOSITORY}/gate:0.1.0
 #   gate.debug.wasm  -> ${REPOSITORY}/gate:0.1.0_debug
 #
-# VERSION            the version to publish, a leading `v` is dropped from the tag, e.g. v0.1.0
+# VERSION            the version to publish, with or without a leading `v`, e.g. v0.1.0 or 0.1.0. The
+#                    org.opencontainers.image.version annotation always has the `v`, the tag never
+#                    does, e.g. v0.1.0 is tagged 0.1.0
 # REPOSITORY         the repository to publish to, e.g. ghcr.io/componentized/http
 # GITHUB_REPOSITORY  the GitHub repository the components are built from, e.g. componentized/http
 # COMPONENTS_DIR     the directory the components are built into, defaults to target/components
@@ -72,8 +74,9 @@ git diff --quiet HEAD || revision="${commit}+dirty"
 url="https://github.com/${GITHUB_REPOSITORY}/tree/${commit}"
 [[ -f "components/${component}/README.md" ]] && url="${url}/components/${component}"
 
-component_version="$VERSION"
-[[ -n "$debug" ]] && component_version="${VERSION}+debug"
+# the version has a leading `v`, the tag does not, whether or not VERSION has one
+component_version="v${VERSION#v}"
+[[ -n "$debug" ]] && component_version="${component_version}+debug"
 tag="${component_version#v}"
 tag="${tag//+/_}"
 
