@@ -216,6 +216,10 @@ jobs:
       # the repository variable DRY_RUN=true goes through publishing without publishing anything:
       # nothing is pushed or signed, and no release is drafted
       DRY_RUN: ${{ vars.DRY_RUN == 'true' }}
+    outputs:
+      # the version published, and whether anything was, for the directory-scan job
+      version: ${{ steps.version.outputs.VERSION }}
+      published: ${{ steps.publish.outputs.published == 'true' }}
     steps:
       - name: Dry run
         if: env.DRY_RUN == 'true'
@@ -229,7 +233,7 @@ jobs:
           make tools
           make -s tools-path >> "${GITHUB_PATH}"
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
       - name: Download components.tar
         uses: actions/download-artifact@v8
         with:
@@ -250,6 +254,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         id: tag_version
         run: echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_OUTPUT
+      - name: Get publish version
+        # the interface version on main, the tag on a tag, without a leading `v`, e.g. 0.1.0 for v0.1.0
+        id: version
+        env:
+          VERSION: ${{ case(github.ref == 'refs/heads/main', steps.interface_version.outputs.VERSION, steps.tag_version.outputs.VERSION) }}
+        run: echo "VERSION=${VERSION#v}" >> $GITHUB_OUTPUT
       - name: Check tag matches the workspace version
         # cargo binstall finds the cli archives at the release tagged with the cli crate's version,
         # and publishing the release publishes the crates to crates.io at that version. A repository
@@ -271,11 +281,16 @@ jobs:
       - name: Publish components to gchr.io
         # only publish tags and pre-releases from main
         if: startsWith(github.ref, 'refs/tags/') || (github.ref == 'refs/heads/main' && contains(steps.interface_version.outputs.VERSION, '-'))
-        run: make publish
+        id: publish
+        run: |
+          make publish
+          if [ "${DRY_RUN}" != "true" ] ; then
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          fi
         env:
           PUBLISH_LOG: "${{ runner.temp }}/published.txt"
           REPOSITORY: "ghcr.io/${{ github.repository }}"
-          VERSION: "${{ case(github.ref == 'refs/heads/main', steps.interface_version.outputs.VERSION, steps.tag_version.outputs.VERSION) }}"
+          VERSION: "${{ steps.version.outputs.VERSION }}"
       - name: Draft release notes
         if: startsWith(github.ref, 'refs/tags/') || (github.ref == 'refs/heads/main' && contains(steps.interface_version.outputs.VERSION, '-'))
         run: |
@@ -302,3 +317,28 @@ jobs:
             ${{ needs.settings.outputs.cli != '' && 'dist/*' || '' }}
           fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # asks componentized/directory to scan the components just published. The organization variable
+  # COMPONENTIZED_DIRECTORY_SCAN=true limits it to componentized repositories, a repository outside
+  # it uses the build without the custodian's access to the directory.
+  directory-scan:
+    # !cancelled() rather than the default success(), which is false when the cli is skipped
+    if: ${{ !cancelled() && vars.COMPONENTIZED_DIRECTORY_SCAN == 'true' && needs.publish.result == 'success' && needs.publish.outputs.published == 'true' }}
+    needs: publish
+    # the app token is used, not the GITHUB_TOKEN
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create directory token
+        id: directory-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CUSTODIAN_CLIENT_ID }}
+          private-key: ${{ secrets.CUSTODIAN_PRIVATE_KEY }}
+          repositories: directory
+          permission-contents: write
+      - name: Request a directory scan
+        env:
+          GH_TOKEN: ${{ steps.directory-token.outputs.token }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: gh api repos/componentized/directory/dispatches -f event_type=release -f "client_payload[only]=${GITHUB_REPOSITORY}" -f "client_payload[version]=${VERSION}"

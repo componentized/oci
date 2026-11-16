@@ -18,7 +18,8 @@ export WKG_CONFIG_FILE := $(abspath .config/wasm-pkg/config.toml)
 .DEFAULT_GOAL := all
 
 # the rust target components are built for, `wasm32-wasip3` builds components that run std threads on
-# component model cooperative threads, see build/components.mk. A component built with cargo may name
+# component model cooperative threads, see build/components.mk, `wasm32-wasip2` builds components
+# rust links itself, e.g. a command. A component built with cargo may name
 # its own in its Cargo.toml, `COMPONENT_TARGET` given on the command line overrides it, e.g.
 #
 #   [package.metadata.componentized]
