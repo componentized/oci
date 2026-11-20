@@ -18,7 +18,7 @@ path = "lib.rs"
 wasmtime-cli = ["wasmtime"]
 
 [dependencies]
-wasmtime-cli = "=50.0.1"
+wasmtime-cli = "=50.0.2"
 
 # not a member of the repository's workspace
 [workspace]
