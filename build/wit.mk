@@ -10,6 +10,12 @@ wit_deps = $(patsubst ./%,%,$(1)/wit/deps)
 
 WIT_DEPS := $(foreach dir,$(WKG_DIRS),$(call wit_deps,$(dir)))
 
+# the cache wkg fetches packages into, in place of the system cache. wkg caches a package by its
+# version, so a dev version fetched again would come from the cache, stale, rather than the registry.
+# Exported for every wkg the build runs, absolute as wkg also runs in other directories, e.g.
+# `cd components && wkg fetch`. `make clean-wit` removes it.
+export WKG_CACHE_DIR := $(abspath target/wkg-cache)
+
 # runs wkg with the arguments in the directory with a wkg.toml, e.g. `$(call wkg,components,fetch)`.
 # wkg rewrites wkg.lock even when nothing changed, which would leave everything made from the lock
 # looking out of date, so the lock is put back as it was, with its time, when its content is unchanged
@@ -18,9 +24,9 @@ wkg = cp -p $(1)/wkg.lock $(1)/wkg.lock.orig && \
 	if cmp -s $(1)/wkg.lock.orig $(1)/wkg.lock; then mv $(1)/wkg.lock.orig $(1)/wkg.lock; else rm $(1)/wkg.lock.orig; fi; \
 	exit $$status
 
-.PHONY: clean-wit ## Remove the fetched wit dependencies, fetched again by `make wit`
+.PHONY: clean-wit ## Remove the fetched wit dependencies and the wkg cache, fetched again by `make wit`
 clean-wit:
-	rm -rf $(WIT_DEPS)
+	rm -rf $(WIT_DEPS) $(WKG_CACHE_DIR)
 
 .PHONY: wit ## Fetch the wit dependencies of each wkg.toml into its wit/deps
 wit: $(WIT_DEPS)

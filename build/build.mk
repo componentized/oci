@@ -46,6 +46,7 @@ PUBLISH_CRATES ?=
 include build/tools.mk
 include build/wit.mk
 include build/components.mk
+include build/sbom.mk
 include build/publish.mk
 include build/sync.mk
 

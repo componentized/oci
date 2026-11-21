@@ -54,6 +54,8 @@ jobs:
         run: |
           make tools
           make -s tools-path >> "${GITHUB_PATH}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Bump version
         # also fetches the wit dependencies for the new version, and builds and tests the components
         run: build/scripts/bump-version.sh "${VERSION}"
