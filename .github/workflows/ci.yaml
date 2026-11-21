@@ -10,6 +10,11 @@ on:
       - 'v[0-9]+\.[0-9]+\.[0-9]+-?**'
   pull_request: {}
 
+# read only unless a job asks for more, e.g. publish, the GITHUB_TOKEN is otherwise the repository's
+# default, which may be able to write
+permissions:
+  contents: read
+
 jobs:
   # the settings of the repository's Makefile the other jobs need, e.g. whether it builds a cli
   settings:
@@ -31,13 +36,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Cache tools
+        # the tools installed here, with a read only GITHUB_TOKEN, are restored by the publish job,
+        # which doesn't install them with its token that can write. Saved once the job succeeds.
+        uses: actions/cache@v6
+        with:
+          path: target/tools
+          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/tools/Cargo.toml', 'tools/Cargo.toml', 'rust-toolchain.toml', 'build/tools.mk') }}
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@main
       - name: Install tools
-        # the versions pinned in build/tools/Cargo.toml and tools/Cargo.toml, on the path for later steps
+        # the versions pinned in build/tools/Cargo.toml and tools/Cargo.toml, on the path for later
+        # steps. Nothing to install when the cache is restored. The token raises cargo binstall's
+        # GitHub API rate limit.
         run: |
           make tools
           make -s tools-path >> "${GITHUB_PATH}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate
         # the wit dependencies, and anything else the repository generates, see `make generate`
         run: make generate
@@ -132,6 +148,16 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: ${{ matrix.target }}
+      - name: Install musl
+        # the static linux builds compile the C of a crate the cli depends on, e.g. aws-lc-sys of rustls,
+        # with musl-gcc, cc looks for a cross compiler, e.g. x86_64-linux-musl-gcc, the runners have none
+        if: endsWith(matrix.target, '-linux-musl')
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_${TARGET//-/_}=musl-gcc" >> "${GITHUB_ENV}"
       - name: Build cli
         run: cargo build --release --locked --bin "${CLI_BIN}" --target ${{ matrix.target }}
       - name: Package cli
@@ -226,14 +252,18 @@ jobs:
         run: echo "::notice::a dry run, the repository variable DRY_RUN is true, nothing is published"
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
-      - name: Install cargo binstall
-        uses: cargo-bins/cargo-binstall@main
-      - name: Install tools
-        run: |
-          make tools
-          make -s tools-path >> "${GITHUB_PATH}"
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.3
+      - name: Restore tools
+        # installed by the build job, so the tools aren't downloaded, or built, where the GITHUB_TOKEN
+        # can write and OIDC tokens can be requested. The key must match the build job's.
+        uses: actions/cache/restore@v6
+        with:
+          path: target/tools
+          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build/tools/Cargo.toml', 'tools/Cargo.toml', 'rust-toolchain.toml', 'build/tools.mk') }}
+          fail-on-cache-miss: true
+      - name: Add tools to the path
+        # the restored tools, nothing is installed. Publishing only needs the pinned tools, wkg and
+        # cosign, a local tool isn't built here.
+        run: make -s tools-path >> "${GITHUB_PATH}"
       - name: Download components.tar
         uses: actions/download-artifact@v8
         with:
@@ -284,7 +314,8 @@ jobs:
         id: publish
         run: |
           make publish
-          if [ "${DRY_RUN}" != "true" ] ; then
+          # nothing may be published, e.g. a repository of tests, see PUBLISH_INTERFACE
+          if [ "${DRY_RUN}" != "true" ] && [ -s "${PUBLISH_LOG}" ] ; then
             echo "published=true" >> "${GITHUB_OUTPUT}"
           fi
         env:
@@ -293,25 +324,83 @@ jobs:
           VERSION: "${{ steps.version.outputs.VERSION }}"
       - name: Draft release notes
         if: startsWith(github.ref, 'refs/tags/') || (github.ref == 'refs/heads/main' && contains(steps.interface_version.outputs.VERSION, '-'))
+        # with COMPONENTIZED_DIRECTORY_SCAN=true, each file leads with its id and icon linking to the
+        # page componentized.dev serves its version at once the directory-scan job's scan has indexed
+        # it, the debug build to the page of its version. The directory's id of a package is its repository
+        # path, e.g. ghcr.io/componentized/logging is componentized:logging, the interface, and
+        # ghcr.io/componentized/logging/levels is componentized:logging-levels, a component. The icon
+        # is the directory's for the kind of package, https://componentized.dev/_icons/, in the colors
+        # of GitHub's light or dark theme, neutral where the theme isn't known.
+        env:
+          DIRECTORY: ${{ vars.COMPONENTIZED_DIRECTORY_SCAN == 'true' }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
+          icons="https://componentized.dev/_icons"
+          published="${RUNNER_TEMP}/published.txt"
+          if [ ! -s "${published}" ] ; then
+            # nothing published, e.g. a repository of tests, see PUBLISH_INTERFACE, or a dry run
+            echo "No components are published with this release." > "${RUNNER_TEMP}/release-notes.md"
+            cat "${RUNNER_TEMP}/release-notes.md"
+            exit 0
+          fi
           {
             echo "## Published components"
             echo
-            echo "| File | Size | Image |"
-            echo "| --- | --: | --- |"
+            if [ "${DIRECTORY}" = "true" ] ; then
+              echo "| Directory | File | Size | Image |"
+              echo "| --- | --- | --: | --- |"
+            else
+              echo "| File | Size | Image |"
+              echo "| --- | --: | --- |"
+            fi
             while read -r file bytes image ; do
               size=$( numfmt --to=iec-i --suffix=B --format=%.1f "${bytes}" )
-              echo "| \`${file}\` | ${size} | \`${image}\` |"
-            done < "${RUNNER_TEMP}/published.txt"
+              row="| \`${file}\` | ${size} | \`${image}\` |"
+              if [ "${DIRECTORY}" = "true" ] ; then
+                # e.g. ghcr.io/componentized/logging/levels:0.3.1@sha256:... -> componentized/logging/levels
+                path="${image#*/}"
+                path="${path%%[:@]*}"
+                namespace="${path%%/*}"
+                name="${path#*/}"
+                name="${name//\//-}"
+                # the directory's kind: the interface is a package, a component composed with wac
+                # is a composition, e.g. levels.debug.wasm from components/levels/levels.wac
+                component="${file%.wasm}"
+                component="${component%.debug}"
+                if [ "${file}" = "interface.wasm" ] ; then
+                  kind=package
+                elif [ -f "components/${component}/${component}.wac" ] || [ -f "components/${component}/${component}.plug" ] ; then
+                  kind=composition
+                else
+                  kind=component
+                fi
+                id="${namespace}:${name}@${VERSION}"
+                # each icon is 26 by 26, a 16 by 16 icon with a margin for its badges, centered on the
+                # text. GitHub drops the styles that would keep the id on one line, so a word joiner
+                # holds the id to its icon and its hyphens are non-breaking hyphens, the link and its
+                # title have the id as it is. The link has GitHub's color, GitHub drops the styles
+                # that would give it the directory's.
+                picture="<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"${icons}/dark/${kind}.svg\"><source media=\"(prefers-color-scheme: light)\" srcset=\"${icons}/light/${kind}.svg\"><img src=\"${icons}/neutral/${kind}.svg\" width=\"26\" height=\"26\" align=\"absmiddle\" alt=\"${kind}\"></picture>"
+                label="${id//-/$'\xe2\x80\x91'}"
+                row="| <a href=\"https://componentized.dev/${namespace}/${name}/${VERSION}/\" title=\"${id}\">${picture}"$'\xe2\x81\xa0'"${label}</a> ${row}"
+              fi
+              echo "${row}"
+            done < "${published}"
           } > "${RUNNER_TEMP}/release-notes.md"
           cat "${RUNNER_TEMP}/release-notes.md"
+      - name: Pack components.tar with the published SBOMs
+        # each component released with an SBOM, the one it's published with, see PUBLISHED_SBOM_DIR in
+        # build/sbom.mk, in place of the build's, which doesn't name its version or image. A file that
+        # isn't published, e.g. a dep- component, keeps the build's, see build/scripts/pack-components.sh
+        if: startsWith(github.ref, 'refs/tags/') && env.DRY_RUN != 'true'
+        run: build/scripts/pack-components.sh target/components target/sbom/published components.tar
       - name: Draft GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') && ( env.DRY_RUN != 'true' || github.repository == 'componentized/build' )
+        if: startsWith(github.ref, 'refs/tags/') && env.DRY_RUN != 'true'
         uses: softprops/action-gh-release@v3
         with:
           draft: true
           body_path: ${{ runner.temp }}/release-notes.md
-          # the cli archives of a repository with a cli
+          # the components with their SBOMs, and the cli archives of a repository with a cli
           files: |
             components.tar
             ${{ needs.settings.outputs.cli != '' && 'dist/*' || '' }}

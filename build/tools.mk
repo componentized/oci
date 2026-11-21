@@ -55,6 +55,18 @@ $(TOOLS_MK): $(TOOLS_MANIFESTS) build/pinned.jq
 	@echo "TOOLS_MANIFESTS_PINNED := $(TOOLS_MANIFESTS)" >> $@.tmp
 	@mv $@.tmp $@
 
+# the binaries that print shell completions and their arguments, read by build/scripts/completions.sh
+# as a shell starts, see [package.metadata.completions] in build/tools/Cargo.toml. Generated with the
+# tools, the repository's tools/Cargo.toml is read last, overriding the build's.
+TOOLS_COMPLETIONS := target/tools/completions
+
+tools: $(TOOLS_COMPLETIONS)
+
+$(TOOLS_COMPLETIONS): $(TOOLS_MANIFESTS) build/completions.jq
+	@mkdir -p $(@D)
+	@set -o pipefail; for manifest in $(TOOLS_MANIFESTS); do cargo metadata --manifest-path $$manifest --no-deps --format-version 1; done | jq -rs -f build/completions.jq > $@.tmp
+	@mv $@.tmp $@
+
 # the packages of the workspace, generated again when LOCAL_TOOLS changes. The workspace's members may
 # change without changing Cargo.toml or Cargo.lock, `make clean-tools` generates it again.
 $(LOCAL_TOOLS_MK): Cargo.toml Cargo.lock $(filter-out $(TOOLS_MK) $(LOCAL_TOOLS_MK),$(MAKEFILE_LIST)) build/local.jq
@@ -106,6 +118,31 @@ $(call tool,$1): Cargo.toml Cargo.lock $(wildcard rust-toolchain.toml) $(if $(LO
 endef
 
 $(foreach name,$(LOCAL_TOOLS),$(eval $(call INSTALL_LOCAL_TOOL,$(name))))
+
+# cosign, which signs the published components and attests their SBOMs, see build/scripts/publish.sh,
+# and verifies the SBOM attested to a component pulled with wkg, see build/scripts/sbom.sh. A binary
+# of the release for the host, checked against the release's checksums, run as `$(COSIGN)`.
+COSIGN_VERSION := 3.1.4
+COSIGN_HOST := $(or $(word 2,$(subst :, ,$(filter $(shell rustc --print host-tuple):%,aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-amd64 aarch64-unknown-linux-gnu:linux-arm64 x86_64-unknown-linux-gnu:linux-amd64))),unsupported-host)
+COSIGN := $(TOOLS_BIN)/cosign
+COSIGN_INSTALLED := $(TOOLS_DIR)/.installed/cosign@$(COSIGN_VERSION)
+
+tools: $(COSIGN_INSTALLED)
+
+$(COSIGN_INSTALLED):
+	@mkdir -p $(TOOLS_BIN) $(@D)
+	@curl -fsSL -o $(COSIGN).download https://github.com/sigstore/cosign/releases/download/v$(COSIGN_VERSION)/cosign-$(COSIGN_HOST)
+	@expected=$$(curl -fsSL https://github.com/sigstore/cosign/releases/download/v$(COSIGN_VERSION)/cosign_checksums.txt | awk '$$2 == "cosign-$(COSIGN_HOST)" { print $$1 }'); \
+		actual=$$( (sha256sum $(COSIGN).download 2> /dev/null || shasum -a 256 $(COSIGN).download) | cut -d' ' -f1); \
+		if [ -z "$$expected" ] || [ "$$expected" != "$$actual" ]; then \
+			rm -f $(COSIGN).download; \
+			echo "cosign-$(COSIGN_HOST) $(COSIGN_VERSION) has the SHA-256 $$actual, not the $${expected:-unknown} of the release's checksums" >&2; \
+			exit 1; \
+		fi
+	@chmod +x $(COSIGN).download
+	@mv $(COSIGN).download $(COSIGN)
+	@rm -f $(@D)/cosign@*
+	@touch $@
 
 ifneq ($(filter wasm32-wasip3,$(COMPONENT_TARGETS)),)
 

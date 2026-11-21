@@ -63,8 +63,14 @@ clean-components: clean-wit
 .PHONY: components ## Build the interface and each component into target/components, `make components/<name>` builds one
 components: ${COMPONENTS_DIR}/interface.wasm $(foreach component,$(COMPONENTS),${COMPONENTS_DIR}/$(component)/$(component).wasm ${COMPONENTS_DIR}/$(component)/$(component).debug.wasm)
 
+# the components whose release and debug builds may have different WIT, not checked by `make
+# check-components`, e.g. a wasm32-wasip3 component whose release build wasm-opt optimizes, see
+# COMPONENT_OPTIMIZE, dropping imports of the standard library the debug build keeps:
+# `CHECK_COMPONENTS_SKIP := gate`. `make check-components/<name>` still checks one.
+CHECK_COMPONENTS_SKIP ?=
+
 .PHONY: check-components ## Check the release and debug build of each component have the same WIT, `make check-components/<name>` checks one
-check-components: $(foreach component,$(COMPONENTS),check-components/$(component))
+check-components: $(foreach component,$(filter-out $(CHECK_COMPONENTS_SKIP),$(COMPONENTS)),check-components/$(component))
 
 .PHONY: validate-components ## Validate the release and debug build of each component, `make validate-components/<name>` checks one
 validate-components: $(foreach component,$(COMPONENTS),validate-components/$(component))
