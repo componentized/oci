@@ -6,13 +6,14 @@ members = [
 ]
 
 [workspace.dependencies]
-chrono = { git = "https://github.com/chronotope/chrono.git", branch = "0.5.x" }
 httpdate = "1.0"
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 test-harness = { path = "./crates/test-harness" }
+# parsing only, the defaults and formatting add to the size of the component
+time = { version = "0.3", default-features = false, features = ["parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 url = "2.5"
 wasmtime = { version = "50", features = ["component-model-async"] }
