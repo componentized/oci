@@ -418,7 +418,7 @@ impl<D> StreamConsumer<D> for BytesConsumer {
     ) -> Poll<Result<StreamResult>> {
         let this = self.get_mut();
         let mut source = source.as_direct(store);
-        let chunk = source.remaining().to_vec();
+        let chunk = source.remaining()?.to_vec();
         source.mark_read(chunk.len());
         this.remaining = this.remaining.saturating_sub(chunk.len());
         if this.tx.send(chunk).is_err() || this.remaining == 0 {
