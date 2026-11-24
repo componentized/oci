@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, fmt::Display, ops::RangeInclusive, time::UNIX_E
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::Digest as _;
+use time::format_description::well_known::Rfc3339;
 use url::Url;
 use wit_bindgen::{FutureReader, StreamReader, StreamResult};
 
@@ -533,7 +534,7 @@ impl OCIClient {
     fn parse_oci_image_config_v1(v: &Value, field: &str) -> Result<Option<Config>, ErrorCode> {
         Self::parse_object(v, field, |v, _field| {
             Ok(Config::OciImageV1(OciImageConfigV1 {
-                created: Self::parse_instant(&v["created"], &format!("{field}.crated"))?,
+                created: Self::parse_instant(&v["created"], &format!("{field}.created"))?,
                 author: Self::parse_string(&v["author"], &format!("{field}.author"))?,
                 architecture: Self::required(
                     Self::parse_string(&v["architecture"], &format!("{field}.architecture")),
@@ -783,11 +784,12 @@ impl OCIClient {
     fn parse_instant(v: &Value, field: &str) -> Result<Option<Instant>, ErrorCode> {
         match Self::parse_string(v, field)? {
             Some(timestamp) => {
-                let date_time = chrono::DateTime::parse_from_rfc3339(&timestamp)?;
-                Ok(Some(Instant {
-                    seconds: date_time.timestamp(),
-                    nanoseconds: date_time.timestamp_subsec_nanos(),
-                }))
+                let date_time = time::OffsetDateTime::parse(&timestamp, &Rfc3339)?;
+                let instant = Instant {
+                    seconds: date_time.unix_timestamp(),
+                    nanoseconds: date_time.nanosecond(),
+                };
+                Ok(Some(instant))
             }
             None => Ok(None),
         }
@@ -1223,8 +1225,8 @@ impl From<serde_json::Error> for ErrorCode {
     }
 }
 
-impl From<chrono::ParseError> for ErrorCode {
-    fn from(value: chrono::ParseError) -> Self {
+impl From<time::error::Parse> for ErrorCode {
+    fn from(value: time::error::Parse) -> Self {
         Self::Other(Some(value.to_string()))
     }
 }
@@ -2115,7 +2117,7 @@ mod tests {
                             "componentized:oci/client@0.0.0-dev"
                         ],
                         "imports":[
-                            "componentized:http/client@0.1.0-dev",
+                            "componentized:http/client@0.1.0",
                             "wasi:clocks/system-clock@0.3.0"
                         ],
                         "target": null
@@ -2141,7 +2143,7 @@ mod tests {
                 component: Some(WasmConfigV0Component {
                     exports: vec!["componentized:oci/client@0.0.0-dev".to_string(),],
                     imports: vec![
-                        "componentized:http/client@0.1.0-dev".to_string(),
+                        "componentized:http/client@0.1.0".to_string(),
                         "wasi:clocks/system-clock@0.3.0".to_string()
                     ],
                     target: None,

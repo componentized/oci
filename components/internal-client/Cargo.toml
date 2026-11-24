@@ -8,11 +8,11 @@ license = "Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-chrono = { workspace = true }
 httpdate = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+time = { workspace = true }
 url = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async-spawn"] }
 
