@@ -2117,7 +2117,7 @@ mod tests {
                             "componentized:oci/client@0.0.0-dev"
                         ],
                         "imports":[
-                            "componentized:http/client@0.1.0",
+                            "componentized:http/client@0.1.1",
                             "wasi:clocks/system-clock@0.3.0"
                         ],
                         "target": null
@@ -2143,7 +2143,7 @@ mod tests {
                 component: Some(WasmConfigV0Component {
                     exports: vec!["componentized:oci/client@0.0.0-dev".to_string(),],
                     imports: vec![
-                        "componentized:http/client@0.1.0".to_string(),
+                        "componentized:http/client@0.1.1".to_string(),
                         "wasi:clocks/system-clock@0.3.0".to_string()
                     ],
                     target: None,
