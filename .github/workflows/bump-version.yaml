@@ -9,7 +9,7 @@ on:
         type: string
         # the repository's own version, carried forward by build/scripts/update-build.sh, and ignored
         # by build/scripts/check-build.sh
-        default: "0.1.1-dev" # the current version, kept current by build/scripts/bump-version.sh
+        default: "0.1.1" # the current version, kept current by build/scripts/bump-version.sh
 
 jobs:
   # bumps the version with read only access, the changes are handed to the push job as a patch so
